@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="vendor/xterm.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Funky Term</title>
+  </head>
+
+  <body>
+    <div id="bar">
+      <button id="new-tab" title="New Tab">+</button>
+      <button id="projects-menu" title="Projects">▾</button>
+    </div>
+    <div id="project-bar" hidden><button id="new-project-tab" title="New Tab in Project">+</button></div>
+    <div id="terminals"></div>
+    <div id="projects" hidden>
+      <div class="projects-panel" role="dialog" aria-label="Projects">
+        <header>
+          <h1>Projects</h1>
+          <button id="projects-close" class="icon" title="Close (Esc)">×</button>
+        </header>
+        <div class="projects-body">
+          <aside>
+            <ul id="project-list"></ul>
+            <button id="project-new" class="add">+ New Project</button>
+          </aside>
+          <section id="project-editor"></section>
+        </div>
+        <footer id="project-footer"></footer>
+      </div>
+    </div>
+    <div id="menu" hidden></div>
+    <script src="vendor/xterm.js"></script>
+    <script src="vendor/addon-fit.js"></script>
+    <script src="vendor/addon-webgl.js"></script>
+    <script src="main.js" type="module"></script>
+  </body>
+</html>

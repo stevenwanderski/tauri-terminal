@@ -1,0 +1,1238 @@
+import { THEMES } from "./themes.js";
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+// Terminal settings shared by every tab. `theme` (the colors) is set by applyTheme.
+const termOptions = {
+  fontFamily: "Monaco, monospace",
+  fontSize: 16,
+  lineHeight: 1.1,
+  cursorBlink: true,
+  fontWeightBold: "normal",
+  drawBoldTextInBrightColors: false,
+};
+
+// Tabs are either loose or in a project. The top bar holds loose tabs and open
+// projects (▣) side by side; selecting a project shows its tabs in a second bar
+// underneath. An open project may be linked to a saved project (see "Projects" below)
+// or be unsaved. With no projects open, the top bar is just a plain tab bar.
+const barEl = document.getElementById("bar");
+const newTabEl = document.getElementById("new-tab");
+const projectsMenuEl = document.getElementById("projects-menu");
+const projectBarEl = document.getElementById("project-bar");
+const newProjectTabEl = document.getElementById("new-project-tab");
+const terminalsEl = document.getElementById("terminals");
+const menuEl = document.getElementById("menu");
+const projectsEl = document.getElementById("projects");
+
+// Each tab is an xterm.js instance plus a PTY in Rust, matched by id.
+const sessions = new Map(); // id -> { term, fitAddon, el, tabEl, labelEl, pending, project, ... }
+let nextId = 1;
+let activeId = null;
+
+const openProjects = new Map(); // id -> { name, color, savedId, chipEl, stripEl, lastTabId }
+let nextProjectId = 1;
+let activeProject = null; // the active tab's project, or null when a loose tab is active
+
+// Project colors are slots in the active theme's ANSI palette, so they follow theme
+// changes. (A custom "#rrggbb" also works and stays fixed.)
+const PROJECT_SLOTS = ["magenta", "green", "yellow", "blue", "red", "cyan"];
+const colorOf = (slot) => theme.terminal[slot] ?? slot;
+
+// Older saves stored hex colors from the default theme; map those back to their slot.
+function toSlot(color) {
+  if (!color || PROJECT_SLOTS.includes(color)) return color;
+  return PROJECT_SLOTS.find((slot) => THEMES[0].terminal[slot] === color.toLowerCase()) ?? color;
+}
+
+// The slot used least among `colors`, first in palette order on ties, so each new
+// project gets a color the others don't have until all six are taken.
+function leastUsedColor(colors) {
+  const uses = (c) => colors.filter((x) => x === c).length;
+  return PROJECT_SLOTS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+}
+
+await listen("pty-output", (event) => {
+  const { id, data } = event.payload;
+  const s = sessions.get(id);
+  if (!s) return;
+  s.term.write(new Uint8Array(data));
+
+  // First output means zsh has finished starting, so send anything typed meanwhile.
+  if (s.pending !== null) {
+    const typed = s.pending;
+    s.pending = null;
+    if (typed) invoke("pty_write", { id, data: typed });
+  }
+});
+
+// zsh exited on its own (e.g. `exit`), so close its tab.
+await listen("pty-exit", (event) => closeTab(event.payload));
+
+// `projectId` null makes a loose tab. `cwd` and `name` are used when restoring tabs
+// and opening saved projects. `command` runs once the shell is ready, unless `run` is
+// false (restored tabs keep their command for saving, but don't rerun it).
+async function newTab(projectId = activeProject, { cwd = null, name = null, command = null, run = true } = {}) {
+  const id = nextId++;
+
+  const el = document.createElement("div");
+  el.className = "terminal";
+  terminalsEl.appendChild(el);
+
+  const term = new Terminal(termOptions);
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(el);
+  // The WebGL renderer draws block and box-drawing characters itself instead of using
+  // the font. Monaco lacks most of them (e.g. ▐ ▛ ▜ ▌), and fallback fonts don't line
+  // up with its cells. If WebGL is unavailable or lost, xterm.js keeps its DOM renderer.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch (err) {
+    console.warn("WebGL renderer unavailable, using DOM renderer", err);
+  }
+  // Hold keystrokes until zsh is ready (pending becomes null on its first output).
+  // Sent earlier, the PTY echoes them before the prompt and zsh marks that line with "%".
+  term.onData((data) => {
+    const s = sessions.get(id);
+    if (s.pending === null) invoke("pty_write", { id, data });
+    else s.pending += data;
+  });
+
+  const tabEl = document.createElement("div");
+  tabEl.className = "bar-item tab";
+  tabEl.dataset.id = id;
+  tabEl.addEventListener("click", () => activate(id));
+  tabEl.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, tabMenuItems(id));
+  });
+  tabEl.addEventListener("dblclick", (e) => {
+    if (!e.target.closest(".close")) renameTab(id);
+  });
+  makeDraggable(tabEl);
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "label";
+  labelEl.textContent = name ?? "zsh";
+  tabEl.appendChild(labelEl);
+
+  // The shell names the tab with OSC 1 (oh-my-zsh sends the current directory at
+  // the prompt and the command name while one runs) or OSC 0 (title + tab name).
+  // A name set by the user wins; the shell's title is kept for when it's cleared.
+  // Returning false lets xterm.js run its own handling for these too.
+  for (const osc of [0, 1]) {
+    term.parser.registerOscHandler(osc, (title) => {
+      const s = sessions.get(id);
+      s.autoTitle = title || "zsh";
+      if (s.customName === null && !s.renaming) labelEl.textContent = s.autoTitle;
+      return false;
+    });
+  }
+
+  const closeEl = document.createElement("button");
+  closeEl.className = "close";
+  closeEl.textContent = "×";
+  closeEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeTab(id);
+  });
+  tabEl.appendChild(closeEl);
+  if (projectId === null) barEl.insertBefore(tabEl, newTabEl);
+  else openProjects.get(projectId).stripEl.appendChild(tabEl);
+
+  sessions.set(id, {
+    term,
+    fitAddon,
+    el,
+    tabEl,
+    labelEl,
+    // A project's command goes first in the queue, as if typed and Enter pressed.
+    pending: command && run ? `${command}\r` : "",
+    project: projectId,
+    // Kept so saving the project writes the command back.
+    command,
+    autoTitle: "zsh",
+    customName: name,
+    // Saved until zsh reports its own directory, so an early save doesn't lose it.
+    startCwd: cwd,
+    renaming: false,
+  });
+  // Show and fit the tab first so the PTY starts at the right size.
+  activate(id);
+  await invoke("pty_start", { id, cols: term.cols, rows: term.rows, cwd });
+  return id;
+}
+
+function activate(id) {
+  const s = sessions.get(id);
+  activeId = id;
+  activeProject = s.project;
+  if (activeProject !== null) openProjects.get(activeProject).lastTabId = id;
+  projectBarEl.hidden = activeProject === null;
+  for (const [pid, p] of openProjects) {
+    p.stripEl.hidden = pid !== activeProject;
+    p.chipEl.classList.toggle("active", pid === activeProject);
+  }
+  for (const [sid, other] of sessions) {
+    other.el.hidden = sid !== id;
+    other.tabEl.classList.toggle("active", sid === id);
+  }
+  fit();
+  s.term.focus();
+  scheduleSave();
+}
+
+function closeTab(id) {
+  const s = sessions.get(id);
+  if (!s) return;
+  sessions.delete(id);
+  invoke("pty_close", { id });
+  s.term.dispose();
+  s.el.remove();
+  s.tabEl.remove();
+  const projectGone = s.project !== null && removeProjectIfEmpty(s.project);
+
+  if (sessions.size === 0) {
+    newTab(null);
+  } else if (id === activeId) {
+    // Show another tab in the same project if it has any left, else the last top-bar item.
+    if (s.project !== null && !projectGone) switchProject(s.project);
+    else openItem(barItems().at(-1));
+  }
+  scheduleSave();
+}
+
+// Top-bar items (loose tabs and open projects) in order; dragging can reorder them.
+function barItems() {
+  return [...barEl.querySelectorAll(":scope > .bar-item")];
+}
+
+// Show a top-bar item: a loose tab, or a project (its last-used tab).
+function openItem(el) {
+  if (el.classList.contains("project-chip")) switchProject(Number(el.dataset.project));
+  else activate(Number(el.dataset.id));
+}
+
+// Tab ids of an open project in the order they appear in its strip.
+function tabIds(projectId) {
+  const strip = openProjects.get(projectId).stripEl;
+  return [...strip.querySelectorAll(".tab")].map((el) => Number(el.dataset.id));
+}
+
+// Open projects exist only while they have tabs. Returns whether it was removed.
+function removeProjectIfEmpty(projectId) {
+  if (tabIds(projectId).length > 0) return false;
+  const p = openProjects.get(projectId);
+  p.chipEl.remove();
+  p.stripEl.remove();
+  openProjects.delete(projectId);
+  return true;
+}
+
+// Adds an empty project to the top bar; callers move or open a tab into it right away
+// (and call renameProject last, so later focus changes don't end the rename at once).
+// `savedId` links it to a saved project.
+function createProject(name = null, color = null, savedId = null) {
+  const id = nextProjectId++;
+  name ??= `Project ${id}`;
+  color ??= leastUsedColor([...openProjects.values()].map((p) => p.color));
+
+  const stripEl = document.createElement("div");
+  stripEl.className = "tab-strip";
+  stripEl.hidden = true;
+  projectBarEl.insertBefore(stripEl, newProjectTabEl);
+
+  // A div rather than a button, so a rename <input> can live inside it.
+  const chipEl = document.createElement("div");
+  chipEl.className = "bar-item project-chip";
+  chipEl.dataset.project = id;
+  chipEl.textContent = name;
+  chipEl.addEventListener("click", () => switchProject(id));
+  chipEl.addEventListener("dblclick", () => renameProject(id));
+  chipEl.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [
+      { label: "Rename Project", action: () => renameProject(id) },
+      { label: "Save Project", action: () => saveOpenProject(id) },
+      { label: "Edit Project…", action: () => editOpenProject(id) },
+      // Reversed because each tab is placed right after the project.
+      {
+        label: "Move Tabs Out of Project",
+        action: () => tabIds(id).reverse().forEach((t) => moveTab(t, null)),
+      },
+      "-",
+      { swatches: PROJECT_SLOTS, selected: openProjects.get(id).color, pick: (c) => setProjectColor(id, c) },
+      "-",
+      { label: "Close Project", action: () => tabIds(id).forEach(closeTab) },
+    ]);
+  });
+  makeDraggable(chipEl);
+  barEl.insertBefore(chipEl, newTabEl);
+
+  openProjects.set(id, { name, color, savedId, chipEl, stripEl, lastTabId: null });
+  setProjectColor(id, color);
+  return id;
+}
+
+// The project's ▣ icon reads its color from this CSS variable.
+function setProjectColor(projectId, color) {
+  const p = openProjects.get(projectId);
+  p.color = toSlot(color);
+  p.chipEl.style.setProperty("--project-color", colorOf(p.color));
+  scheduleSave();
+}
+
+function switchProject(projectId) {
+  const ids = tabIds(projectId);
+  const last = openProjects.get(projectId).lastTabId;
+  activate(ids.includes(last) ? last : ids.at(-1));
+}
+
+// Move a tab into a project, or out of its project when `target` is null. If the
+// moved tab was showing, the view stays in its old project when that still has tabs,
+// and otherwise follows the tab.
+function moveTab(id, target) {
+  const s = sessions.get(id);
+  const from = s.project;
+  if (from === target) return;
+  s.project = target;
+  if (target === null) {
+    // A tab leaving its project lands right after the project in the top bar.
+    barEl.insertBefore(s.tabEl, openProjects.get(from).chipEl.nextSibling);
+  } else {
+    openProjects.get(target).stripEl.appendChild(s.tabEl);
+  }
+  const fromGone = from !== null && removeProjectIfEmpty(from);
+
+  if (id === activeId) {
+    if (from !== null && !fromGone) switchProject(from);
+    else activate(id);
+  }
+  scheduleSave();
+}
+
+function tabMenuItems(id) {
+  const s = sessions.get(id);
+  const items = [
+    { label: "Rename Tab", action: () => renameTab(id) },
+    "-",
+    {
+      label: "Move to New Project",
+      action: () => {
+        const projectId = createProject();
+        moveTab(id, projectId);
+        renameProject(projectId);
+      },
+    },
+  ];
+  for (const [pid, p] of openProjects) {
+    if (pid !== s.project) items.push({ label: `Move to ${p.name}`, action: () => moveTab(id, pid) });
+  }
+  if (s.project !== null) items.push({ label: "Remove from Project", action: () => moveTab(id, null) });
+  items.push("-", { label: "Close Tab", action: () => closeTab(id) });
+  return items;
+}
+
+function renameProject(projectId) {
+  const p = openProjects.get(projectId);
+  editInline(p.chipEl, p.name, (name) => {
+    if (name) p.name = name;
+    p.chipEl.textContent = p.name;
+    scheduleSave();
+  });
+}
+
+// An empty name returns the tab to the shell's automatic title.
+function renameTab(id) {
+  const s = sessions.get(id);
+  if (s.renaming) return;
+  s.renaming = true;
+  editInline(s.labelEl, s.customName ?? s.autoTitle, (name) => {
+    s.renaming = false;
+    if (name !== null) s.customName = name || null;
+    s.labelEl.textContent = s.customName ?? s.autoTitle;
+    scheduleSave();
+  });
+}
+
+// Swap el's contents for a text box (browser dialogs like prompt() don't work well in
+// Tauri's webview). Enter or clicking away commits, Escape cancels. onDone gets the
+// trimmed text, or null if cancelled, and must restore el's contents.
+function editInline(el, value, onDone) {
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = value;
+  el.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    onDone(commit ? input.value.trim() : null);
+    sessions.get(activeId)?.term.focus();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== "Escape") return;
+    // finish() refocuses the terminal mid-keydown; without preventDefault the key's
+    // follow-up keypress lands there and the shell receives the Enter too.
+    e.preventDefault();
+    finish(e.key === "Enter");
+  });
+  input.addEventListener("blur", () => finish(true));
+  // Clicks in the box shouldn't also switch tabs/projects, start a drag, or re-trigger
+  // a double-click rename.
+  for (const type of ["click", "dblclick", "pointerdown"]) {
+    input.addEventListener(type, (e) => e.stopPropagation());
+  }
+}
+
+// One shared right-click menu. Items are { label, action }, "-" for a separator,
+// { header } for a non-clickable section label, or { swatches, selected, pick } for a
+// row of project color slots.
+function showMenu(x, y, items) {
+  const choose = (action) => {
+    hideMenu();
+    if (projectsEl.hidden) sessions.get(activeId)?.term.focus();
+    action();
+  };
+  menuEl.replaceChildren(
+    ...items.map((item) => {
+      const el = document.createElement("div");
+      if (item === "-") {
+        el.className = "separator";
+        return el;
+      }
+      if (item.header) {
+        el.className = "header";
+        el.textContent = item.header;
+        return el;
+      }
+      if (item.swatches) {
+        el.className = "swatches";
+        for (const color of item.swatches) {
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.classList.toggle("selected", color === toSlot(item.selected));
+          swatch.style.backgroundColor = colorOf(color);
+          swatch.addEventListener("click", () => choose(() => item.pick(color)));
+          el.appendChild(swatch);
+        }
+        return el;
+      }
+      el.className = "item";
+      el.textContent = item.label;
+      el.addEventListener("click", () => choose(item.action));
+      return el;
+    }),
+  );
+  menuEl.hidden = false;
+  // Keep the menu inside the window.
+  const r = menuEl.getBoundingClientRect();
+  menuEl.style.left = `${Math.max(0, Math.min(x, innerWidth - r.width - 4))}px`;
+  menuEl.style.top = `${Math.max(0, Math.min(y, innerHeight - r.height - 4))}px`;
+}
+
+function hideMenu() {
+  menuEl.hidden = true;
+}
+
+window.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (!menuEl.contains(e.target)) hideMenu();
+  },
+  true,
+);
+window.addEventListener("blur", hideMenu);
+
+// Drag a tab or project sideways to reorder it within its bar. Uses pointer events
+// rather than HTML5 drag-and-drop, which Tauri's file-drop handling can intercept.
+function makeDraggable(itemEl) {
+  itemEl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target.closest(".close")) return;
+    const startX = e.clientX;
+    let lastX = startX;
+    let dragging = false;
+
+    const onMove = (e) => {
+      // A few pixels of slack so a plain click doesn't count as a drag.
+      if (!dragging && Math.abs(e.clientX - startX) < 5) return;
+      dragging = true;
+      document.body.classList.add("tab-dragging");
+
+      // Swap as soon as the pointer enters a neighbor, but only the neighbor in the
+      // direction of travel; otherwise a wider neighbor would swap straight back.
+      const container = itemEl.parentElement;
+      const x = e.clientX;
+      if (x > lastX) {
+        let next = itemEl.nextElementSibling;
+        while (next?.classList.contains("bar-item") && x > next.getBoundingClientRect().left) {
+          container.insertBefore(next, itemEl);
+          next = itemEl.nextElementSibling;
+        }
+      } else if (x < lastX) {
+        let prev = itemEl.previousElementSibling;
+        while (prev && x < prev.getBoundingClientRect().right) {
+          container.insertBefore(itemEl, prev);
+          prev = itemEl.previousElementSibling;
+        }
+      }
+      lastX = x;
+    };
+
+    // Listen on window, not the item: moving it in the DOM would drop pointer capture.
+    const onUp = () => {
+      document.body.classList.remove("tab-dragging");
+      if (dragging) scheduleSave();
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
+}
+
+// Only the visible tab can be measured, so hidden tabs are fitted when activated.
+function fit() {
+  const s = sessions.get(activeId);
+  if (!s) return;
+  s.fitAddon.fit();
+  invoke("pty_resize", { id: activeId, cols: s.term.cols, rows: s.term.rows });
+}
+
+// Shift+Cmd+] / [: inside a project, cycle its tabs; otherwise cycle the top-bar items
+// (loose tabs and projects). Wraps around.
+function cycle(step) {
+  if (activeProject !== null) {
+    const ids = tabIds(activeProject);
+    activate(ids[(ids.indexOf(activeId) + step + ids.length) % ids.length]);
+  } else {
+    const items = barItems();
+    const i = items.indexOf(sessions.get(activeId).tabEl);
+    openItem(items[(i + step + items.length) % items.length]);
+  }
+}
+
+// Escape closes an open menu, then the projects panel.
+// Shift+Cmd+P toggles the projects panel; while it's open, Cmd+S saves the project
+// being edited and the tab shortcuts below are off.
+// Cmd+T opens a new tab in the current project (or a loose tab if none is selected).
+// Capture phase so this runs before xterm.js handles the key.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    const handled = () => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    if (e.key === "Escape" && !menuEl.hidden) {
+      handled();
+      hideMenu();
+      return;
+    }
+    if (e.metaKey && e.shiftKey && e.code === "KeyP") {
+      handled();
+      if (projectsEl.hidden) showProjects();
+      else closeProjects();
+      return;
+    }
+    if (!projectsEl.hidden) {
+      if (e.key === "Escape") {
+        handled();
+        closeProjects();
+      } else if (e.metaKey && e.code === "KeyS") {
+        handled();
+        saveDraft();
+      }
+      return;
+    }
+    if (!e.metaKey) return;
+    if (!e.shiftKey && e.code === "KeyT") {
+      handled();
+      newTabHere();
+      return;
+    }
+    if (!e.shiftKey) return;
+    const step = { BracketRight: 1, BracketLeft: -1 }[e.code];
+    if (!step) return;
+    handled();
+    cycle(step);
+  },
+  true,
+);
+
+// A new tab that starts in the active tab's current directory (or where that tab
+// started, if its shell hasn't reported one yet).
+async function newTabHere(projectId = activeProject) {
+  const s = sessions.get(activeId);
+  const cwd = s ? ((await invoke("pty_cwds"))[activeId] ?? s.startCwd) : null;
+  return newTab(projectId, { cwd });
+}
+
+// The top bar's + makes a loose tab; the project bar's + adds to the selected project.
+newTabEl.addEventListener("click", () => newTabHere(null));
+newProjectTabEl.addEventListener("click", () => newTabHere(activeProject));
+
+// The ▾ menu: a new (unsaved) project, saved projects to open, and the projects panel.
+projectsMenuEl.addEventListener("click", () => {
+  const items = [
+    {
+      label: "New Project",
+      action: () => {
+        const projectId = createProject();
+        newTab(projectId);
+        renameProject(projectId);
+      },
+    },
+    "-",
+    ...savedProjects.map((p) => ({ label: `Open ${p.name}`, action: () => openSavedProject(p) })),
+    { label: "Manage Projects…  ⇧⌘P", action: () => showProjects() },
+    "-",
+    // Until there's a theme picker: the bundled themes, current one checked.
+    { header: "Theme" },
+    ...THEMES.map((t) => ({ label: `${t === theme ? "✓" : "\u2003"} ${t.name}`, action: () => setTheme(t) })),
+  ];
+  const r = projectsMenuEl.getBoundingClientRect();
+  showMenu(r.left, r.bottom, items);
+});
+
+// Refit whenever the terminal area changes size (window resizes, project bar showing).
+new ResizeObserver(fit).observe(terminalsEl);
+
+// ---- Themes ----
+// A theme (themes.js) colors the terminals directly and the rest of the app through
+// the CSS variables in styles.css, derived here from the terminal colors unless the
+// theme pins them. Switching applies to everything open, live; the choice is saved.
+
+const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+const rgbToHex = (rgb) => `#${rgb.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+// `t` of the way from color a to color b.
+const mix = (a, b, t) => {
+  const [ra, rb] = [hexToRgb(a), hexToRgb(b)];
+  return rgbToHex(ra.map((v, i) => v + (rb[i] - v) * t));
+};
+const luminance = (hex) => {
+  const [r, g, b] = hexToRgb(hex).map((v) => v / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+// App colors from a terminal theme. Bars are the background shaded darker: strongly
+// on dark themes, gently on light ones. Surfaces, lines and muted text step from the
+// background toward the foreground.
+function appColors(terminal, accent = terminal.magenta) {
+  const { background: bg, foreground: fg } = terminal;
+  const light = luminance(bg) > 0.5;
+  const shade = (amount) => mix(bg, "#000000", light ? amount / 4 : amount);
+  return {
+    bg,
+    fg,
+    bar: shade(0.3),
+    sunken: shade(0.37),
+    tint: mix(shade(0.3), fg, 0.05),
+    raised: mix(bg, fg, 0.05),
+    "raised-hover": mix(bg, fg, 0.1),
+    highlight: mix(bg, accent, 0.3),
+    divider: mix(bg, fg, 0.05),
+    border: mix(bg, fg, 0.1),
+    "border-strong": mix(bg, fg, 0.22),
+    muted: mix(fg, bg, 0.4),
+    placeholder: mix(fg, bg, 0.65),
+    accent,
+    "accent-hover": mix(accent, light ? "#000000" : "#ffffff", 0.15),
+    "on-accent": luminance(accent) > 0.5 ? "#111111" : "#ffffff",
+    danger: terminal.red,
+    backdrop: light ? "rgba(0, 0, 0, 0.25)" : "rgba(0, 0, 0, 0.45)",
+  };
+}
+
+let theme = THEMES[0];
+
+function applyTheme(next) {
+  theme = next;
+  termOptions.theme = theme.terminal;
+  for (const s of sessions.values()) s.term.options.theme = theme.terminal;
+  const vars = { ...appColors(theme.terminal, theme.accent), ...theme.app };
+  for (const [name, value] of Object.entries(vars)) {
+    document.documentElement.style.setProperty(`--${name}`, value);
+  }
+  // Project colors are palette slots; recolor them from the new palette.
+  for (const [pid, p] of openProjects) setProjectColor(pid, p.color);
+  if (!projectsEl.hidden) renderProjects();
+}
+
+function setTheme(next) {
+  applyTheme(next);
+  invoke("store_save", { key: "settings", data: JSON.stringify({ theme: next.name }) });
+}
+
+// ---- Session: what's open, restored on the next launch ----
+// The top bar's items in order (loose tabs, and projects with their tabs), each tab's
+// directory, custom name and command, and what's showing go to a JSON file via Rust.
+// Directories change without any event here (the user just runs `cd`), so also save
+// every few seconds and when the window loses focus. Nothing is saved until restoring
+// has finished.
+let restored = false;
+let saveTimer = null;
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 300);
+}
+
+// A tab as saved data. `cwds` comes from pty_cwds; tabs whose zsh hasn't reported
+// yet use their start directory.
+function snapshotTab(id, cwds) {
+  const s = sessions.get(id);
+  return { cwd: cwds[id] ?? s.startCwd, name: s.customName, command: s.command };
+}
+
+async function save() {
+  if (!restored) return;
+  const cwds = await invoke("pty_cwds");
+  const items = barItems();
+  const shown =
+    activeProject === null ? sessions.get(activeId)?.tabEl : openProjects.get(activeProject).chipEl;
+  const data = {
+    version: 3,
+    active: items.indexOf(shown),
+    items: items.map((el) => {
+      if (!el.classList.contains("project-chip")) {
+        return { type: "tab", ...snapshotTab(Number(el.dataset.id), cwds) };
+      }
+      const pid = Number(el.dataset.project);
+      const p = openProjects.get(pid);
+      const ids = tabIds(pid);
+      return {
+        type: "project",
+        name: p.name,
+        color: p.color,
+        savedId: p.savedId,
+        activeTab: Math.max(0, ids.indexOf(p.lastTabId)),
+        tabs: ids.map((id) => snapshotTab(id, cwds)),
+      };
+    }),
+  };
+  await invoke("store_save", { key: "session", data: JSON.stringify(data) });
+}
+
+setInterval(save, 5000);
+window.addEventListener("blur", save);
+
+async function restore() {
+  const saved = await loadStore("session");
+  // Version 1 files held only groups; versions 1-2 called projects "groups".
+  const v1 = saved?.version === 1;
+  const items = (v1 ? saved.groups?.map((g) => ({ type: "group", ...g })) : saved?.items) ?? [];
+  const active = v1 ? saved.activeGroup : saved?.active;
+
+  // One "show this" function per restored item, to show the saved active one at the end.
+  const shows = [];
+  for (const item of items) {
+    if (item.type === "group" || item.type === "project") {
+      if (!item.tabs?.length) continue;
+      // Old groups had no link; link one to the saved project with its exact name, if unique.
+      const sameName = savedProjects.filter((p) => p.name === item.name);
+      const savedId = item.type === "group" && sameName.length === 1 ? sameName[0].id : item.savedId ?? null;
+      const projectId = createProject(item.name, item.color, savedId);
+      for (const t of item.tabs) await newTab(projectId, { ...t, run: false });
+      const ids = tabIds(projectId);
+      shows.push(() => activate(ids[Math.min(item.activeTab ?? 0, ids.length - 1)]));
+    } else {
+      const id = await newTab(null, { cwd: item.cwd, name: item.name, command: item.command, run: false });
+      shows.push(() => activate(id));
+    }
+  }
+  if (shows.length === 0) {
+    await newTab(null);
+    return;
+  }
+  shows[Math.min(Math.max(active ?? 0, 0), shows.length - 1)]();
+}
+
+// Read a JSON store file; null if it doesn't exist yet or can't be parsed.
+async function loadStore(key) {
+  try {
+    return JSON.parse(await invoke("store_load", { key }));
+  } catch {
+    return null;
+  }
+}
+
+// ---- Projects ----
+// A saved project is a name, a color and a list of tabs, each with an optional name,
+// a directory and a command that runs when the tab opens. Opening one adds it to the
+// top bar as an open project linked to it (or shows it, if it's already open).
+// "Save Project" on an open project writes its current tabs back. Stored via Rust:
+//   [{ id, name, color, tabs: [{ name, cwd, command }] }]   (cwd may start with "~")
+
+const home = await window.__TAURI__.path.homeDir();
+const expandHome = (p) => (p === "~" || p?.startsWith("~/") ? home + p.slice(1) : p || null);
+const tildify = (p) => (p && (p === home || p.startsWith(`${home}/`)) ? `~${p.slice(home.length)}` : p ?? "");
+
+let savedProjects = await loadStore("projects");
+if (!Array.isArray(savedProjects)) savedProjects = [];
+// Earlier projects held groups and loose tabs ("items"); flatten them into one tab list.
+savedProjects = savedProjects.map((p) =>
+  p.items
+    ? {
+        id: p.id,
+        name: p.name,
+        color: toSlot(p.items.find((i) => i.type === "group")?.color) ?? PROJECT_SLOTS[0],
+        tabs: p.items.flatMap((i) => (i.type === "group" ? i.tabs : [{ name: i.name, cwd: i.cwd, command: i.command }])),
+      }
+    : { ...p, color: toSlot(p.color) },
+);
+
+function persistProjects() {
+  return invoke("store_save", { key: "projects", data: JSON.stringify(savedProjects) });
+}
+
+const openInstance = (savedId) => [...openProjects].find(([, p]) => p.savedId === savedId)?.[0];
+
+async function openSavedProject(project) {
+  const already = openInstance(project.id);
+  if (already !== undefined) {
+    switchProject(already);
+    return;
+  }
+  if (project.tabs.length === 0) return;
+  const projectId = createProject(project.name.trim() || "Project", project.color, project.id);
+  for (const t of project.tabs) {
+    await newTab(projectId, {
+      cwd: expandHome(t.cwd?.trim()),
+      name: t.name?.trim() || null,
+      command: t.command?.trim() || null,
+    });
+  }
+  activate(tabIds(projectId)[0]);
+}
+
+// An open project's tabs as saved-project tabs (live directories, names and commands).
+async function liveTabs(projectId) {
+  const cwds = await invoke("pty_cwds");
+  return tabIds(projectId).map((id) => {
+    const s = sessions.get(id);
+    return { name: s.customName ?? "", cwd: tildify(cwds[id] ?? s.startCwd ?? "~"), command: s.command ?? "" };
+  });
+}
+
+// Write an open project back to its saved project, creating and linking one if it
+// isn't saved yet. The chip flashes to confirm.
+async function saveOpenProject(projectId) {
+  const p = openProjects.get(projectId);
+  const entry = {
+    id: p.savedId ?? crypto.randomUUID(),
+    name: p.name,
+    color: p.color,
+    tabs: await liveTabs(projectId),
+  };
+  const i = savedProjects.findIndex((q) => q.id === entry.id);
+  if (i === -1) savedProjects.push(entry);
+  else savedProjects[i] = entry;
+  await persistProjects();
+  p.savedId = entry.id;
+  scheduleSave();
+  // Keep an open, unedited panel showing the new version.
+  if (draft?.id === entry.id && !dirty) {
+    loadDraft(entry);
+    renderProjects();
+  }
+  p.chipEl.classList.remove("flash");
+  void p.chipEl.offsetWidth; // restart the animation
+  p.chipEl.classList.add("flash");
+}
+
+// Open the panel on an open project's saved version, or, if it isn't saved yet, on a
+// new unsaved project filled in from it (linked to it once saved).
+async function editOpenProject(projectId) {
+  const p = openProjects.get(projectId);
+  if (p.savedId && savedProjects.some((q) => q.id === p.savedId)) {
+    showProjects();
+    selectProject(p.savedId);
+    return;
+  }
+  const tabs = await liveTabs(projectId);
+  showProjects();
+  newProject({ name: p.name, color: p.color, tabs }, projectId);
+}
+
+const projectCount = (p) => `${p.tabs.length} tab${p.tabs.length === 1 ? "" : "s"}`;
+
+// The panel edits a copy (`draft`) of one saved project; Save writes it back. Leaving
+// a project with unsaved edits (switching, closing, New) first asks to save.
+const projectListEl = document.getElementById("project-list");
+const projectEditorEl = document.getElementById("project-editor");
+const projectFooterEl = document.getElementById("project-footer");
+let draft = null;
+let dirty = false;
+let pendingLeave = null; // action waiting on the "save changes?" question
+let deleteArmed = false;
+let linkOnSave = null; // { draftId, projectId }: open project to link when the draft is saved
+
+const blankTab = () => ({ name: "", cwd: "~", command: "" });
+const isSaved = (p) => savedProjects.some((q) => q.id === p.id);
+
+function showProjects() {
+  hideMenu();
+  projectsEl.hidden = false;
+  if (!draft && savedProjects.length) loadDraft(savedProjects[0]);
+  renderProjects();
+  projectEditorEl.querySelector(".project-name")?.focus();
+}
+
+function closeProjects() {
+  leave(() => {
+    projectsEl.hidden = true;
+    // Next time, start from the saved version (or the first project).
+    draft = draft && isSaved(draft) ? structuredClone(savedProjects.find((p) => p.id === draft.id)) : null;
+    sessions.get(activeId)?.term.focus();
+  });
+}
+
+function loadDraft(project) {
+  draft = project ? structuredClone(project) : null;
+  dirty = false;
+  deleteArmed = false;
+}
+
+// Run `action` now, or after the user saves or discards unsaved edits.
+function leave(action) {
+  if (!dirty) return action();
+  pendingLeave = action;
+  renderFooter();
+}
+
+function selectProject(id) {
+  leave(() => {
+    loadDraft(savedProjects.find((p) => p.id === id));
+    renderProjects();
+  });
+}
+
+// `prefill` (from an unsaved open project) replaces the default name, color and tabs;
+// `linkTo` is that open project, linked to the new saved project when it's saved.
+function newProject(prefill = null, linkTo = null) {
+  leave(() => {
+    loadDraft({
+      id: crypto.randomUUID(),
+      name: "New Project",
+      color: leastUsedColor(savedProjects.map((p) => p.color)),
+      tabs: [blankTab()],
+      ...prefill,
+    });
+    linkOnSave = linkTo === null ? null : { draftId: draft.id, projectId: linkTo };
+    dirty = true;
+    renderProjects();
+    const nameInput = projectEditorEl.querySelector(".project-name");
+    nameInput.focus();
+    nameInput.select();
+  });
+}
+
+function markDirty() {
+  dirty = true;
+  deleteArmed = false;
+  renderList();
+  renderFooter();
+}
+
+// Returns whether the draft was saved (the name is required).
+function saveDraft() {
+  if (!draft) return false;
+  if (!draft.name.trim()) {
+    const nameInput = projectEditorEl.querySelector(".project-name");
+    nameInput.classList.add("invalid");
+    nameInput.focus();
+    return false;
+  }
+  draft.name = draft.name.trim();
+  const i = savedProjects.findIndex((p) => p.id === draft.id);
+  if (i === -1) savedProjects.push(structuredClone(draft));
+  else savedProjects[i] = structuredClone(draft);
+  persistProjects();
+  if (linkOnSave?.draftId === draft.id && openProjects.has(linkOnSave.projectId)) {
+    openProjects.get(linkOnSave.projectId).savedId = draft.id;
+    linkOnSave = null;
+    scheduleSave();
+  }
+  dirty = false;
+  renderList();
+  renderFooter();
+  return true;
+}
+
+function revertDraft() {
+  loadDraft(isSaved(draft) ? savedProjects.find((p) => p.id === draft.id) : savedProjects[0]);
+  renderProjects();
+}
+
+function deleteDraft() {
+  if (!deleteArmed) {
+    // First click arms the button; a second click within 3 seconds deletes.
+    deleteArmed = true;
+    renderFooter();
+    setTimeout(() => {
+      if (!deleteArmed) return;
+      deleteArmed = false;
+      renderFooter();
+    }, 3000);
+    return;
+  }
+  const i = savedProjects.findIndex((p) => p.id === draft.id);
+  savedProjects.splice(i, 1);
+  persistProjects();
+  // Open copies stay open, just no longer linked.
+  for (const p of openProjects.values()) if (p.savedId === draft.id) p.savedId = null;
+  scheduleSave();
+  loadDraft(savedProjects[Math.min(i, savedProjects.length - 1)]);
+  renderProjects();
+}
+
+async function openDraft() {
+  if (dirty && !saveDraft()) return;
+  const project = structuredClone(draft);
+  closeProjects();
+  await openSavedProject(project);
+}
+
+// --- Panel rendering. Typing updates `draft` in place (no re-render, so focus stays);
+// adding, removing or recoloring re-renders the editor.
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children.filter((c) => c !== null && c !== false));
+  return node;
+}
+
+function renderProjects() {
+  renderList();
+  renderEditor();
+  renderFooter();
+}
+
+function renderList() {
+  const entries = savedProjects.map((p) => (draft?.id === p.id ? draft : p));
+  if (draft && !isSaved(draft)) entries.push(draft);
+  projectListEl.replaceChildren(
+    ...entries.map((p) => {
+      const dot = el("span", { className: "dot" });
+      dot.style.backgroundColor = colorOf(p.color);
+      return el(
+        "li",
+        {
+          className: p.id === draft?.id ? "selected" : "",
+          onclick: () => p.id !== draft?.id && selectProject(p.id),
+        },
+        el("div", { className: "project-title" }, dot, p.name.trim() || "Untitled"),
+        el("div", {
+          className: "project-meta",
+          textContent: isSaved(p) ? projectCount(p) : "Unsaved",
+        }),
+      );
+    }),
+  );
+}
+
+function renderEditor() {
+  if (!draft) {
+    projectEditorEl.replaceChildren(
+      el(
+        "div",
+        { className: "projects-empty" },
+        el("p", { textContent: "No projects yet." }),
+        el("p", {
+          className: "muted",
+          textContent: "A project opens a set of tabs, each starting in its own folder and optionally running a command.",
+        }),
+        el("button", { className: "btn primary", textContent: "New Project", onclick: () => newProject() }),
+      ),
+    );
+    return;
+  }
+
+  const dot = el("button", {
+    className: "dot",
+    title: "Project color",
+    onclick: () => {
+      const r = dot.getBoundingClientRect();
+      showMenu(r.left, r.bottom + 4, [
+        {
+          swatches: PROJECT_SLOTS,
+          selected: draft.color,
+          pick: (c) => {
+            draft.color = c;
+            markDirty();
+            renderEditor();
+          },
+        },
+      ]);
+    },
+  });
+  dot.style.backgroundColor = colorOf(draft.color);
+  const nameInput = el("input", {
+    className: "project-name",
+    value: draft.name,
+    placeholder: "Project name",
+    spellcheck: false,
+    oninput: () => {
+      nameInput.classList.remove("invalid");
+      draft.name = nameInput.value;
+      markDirty();
+    },
+  });
+
+  const rows = draft.tabs.map((t, i) =>
+    tabRow(t, () => {
+      draft.tabs.splice(i, 1);
+      markDirty();
+      renderEditor();
+    }),
+  );
+
+  projectEditorEl.replaceChildren(
+    el(
+      "div",
+      { className: "field" },
+      el("span", { textContent: "Name" }),
+      el("div", { className: "name-row" }, dot, nameInput),
+    ),
+    el(
+      "div",
+      { className: "columns" },
+      el("span", { textContent: "Tab name" }),
+      el("span", { textContent: "Directory" }),
+      el("span", { textContent: "Command" }),
+    ),
+    ...rows,
+    el(
+      "button",
+      {
+        className: "add",
+        textContent: "+ Add tab",
+        onclick: () => {
+          draft.tabs.push(blankTab());
+          markDirty();
+          renderEditor();
+          // Put the cursor in the new row's first field.
+          [...projectEditorEl.querySelectorAll(".tab-row")].at(-1).querySelector("input").focus();
+        },
+      },
+    ),
+  );
+}
+
+function tabRow(tab, remove) {
+  const input = (field, props) =>
+    el("input", {
+      value: tab[field],
+      spellcheck: false,
+      ...props,
+      oninput: (e) => {
+        tab[field] = e.target.value;
+        markDirty();
+      },
+    });
+  const cwdInput = input("cwd", { placeholder: "~" });
+  return el(
+    "div",
+    { className: "tab-row" },
+    input("name", { placeholder: "Automatic" }),
+    el(
+      "div",
+      { className: "dir" },
+      cwdInput,
+      el("button", {
+        className: "icon",
+        title: "Choose folder…",
+        textContent: "…",
+        onclick: async () => {
+          const dir = await window.__TAURI__.dialog.open({
+            directory: true,
+            defaultPath: expandHome(cwdInput.value.trim()) ?? home,
+          });
+          if (!dir) return;
+          cwdInput.value = tab.cwd = tildify(dir);
+          markDirty();
+        },
+      }),
+    ),
+    input("command", { className: "command", placeholder: "None" }),
+    el("button", { className: "icon remove", title: "Remove tab", textContent: "×", onclick: remove }),
+  );
+}
+
+function renderFooter() {
+  if (!draft) {
+    projectFooterEl.replaceChildren();
+    return;
+  }
+  const button = (label, className, onclick, props = {}) =>
+    el("button", { className: `btn ${className}`, textContent: label, onclick, ...props });
+
+  if (pendingLeave) {
+    const name = draft.name.trim() || "this project";
+    const resume = (save) => {
+      if (save && !saveDraft()) {
+        pendingLeave = null;
+        renderFooter();
+        return;
+      }
+      const action = pendingLeave;
+      pendingLeave = null;
+      dirty = false;
+      action();
+    };
+    projectFooterEl.replaceChildren(
+      el("span", { className: "status", textContent: `Save changes to “${name}”?` }),
+      el(
+        "div",
+        { className: "actions" },
+        button("Don't Save", "", () => {
+          if (!isSaved(draft)) loadDraft(null);
+          resume(false);
+        }),
+        button("Keep Editing", "", () => {
+          pendingLeave = null;
+          renderFooter();
+        }),
+        button("Save", "primary", () => resume(true)),
+      ),
+    );
+    return;
+  }
+
+  const openLabel = openInstance(draft.id) === undefined ? "Open" : "Show";
+  projectFooterEl.replaceChildren(
+    isSaved(draft) ? button(deleteArmed ? "Click again to delete" : "Delete", "danger", deleteDraft) : el("span"),
+    el(
+      "div",
+      { className: "actions" },
+      el("span", { className: "status", textContent: dirty ? "Unsaved changes" : "" }),
+      dirty ? button("Cancel", "", revertDraft) : null,
+      button("Save", "", saveDraft, { disabled: !dirty, title: "⌘S" }),
+      button(openLabel, "primary", openDraft, { disabled: draft.tabs.length === 0 }),
+    ),
+  );
+}
+
+document.getElementById("project-new").addEventListener("click", () => newProject());
+document.getElementById("projects-close").addEventListener("click", () => closeProjects());
+// Clicking the dimmed backdrop (outside the panel) also closes it.
+projectsEl.addEventListener("mousedown", (e) => {
+  if (e.target === projectsEl) closeProjects();
+});
+
+const settings = (await loadStore("settings")) ?? {};
+applyTheme(THEMES.find((t) => t.name === settings.theme) ?? THEMES[0]);
+
+await restore();
+restored = true;
+save();
