@@ -1,4 +1,4 @@
-// The app's default theme: the terminal font, font size and colors from the iTerm2
+// The app's default theme: the terminal font, font size, line height and colors from the iTerm2
 // "Steven" profile (light-mode set, converted from Display P3 to sRGB). `terminal` is
 // an xterm.js theme (background, foreground, cursor, selection and the 16 ANSI
 // colors); `app` is the CSS variables in styles.css. All of it can be changed in the
@@ -7,6 +7,7 @@
 export const DEFAULT_THEME = {
   fontFamily: "Monaco",
   fontSize: 16,
+  lineHeight: 1.1,
   terminal: {
     background: "#262427",
     // Slightly dimmer than iTerm2's #fcfcfa so text reads closer to its thin strokes.

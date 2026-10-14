@@ -630,7 +630,7 @@ input[type="color"]::-webkit-color-swatch {
   font: 12px Monaco, monospace;
 }
 
-.projects-panel input.font-size {
+.projects-panel input.number {
   width: 78px;
   padding: 3px 6px;
 }

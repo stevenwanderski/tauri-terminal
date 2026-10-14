@@ -2,10 +2,9 @@ import { DEFAULT_THEME } from "./theme.js";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-// Terminal settings shared by every tab. `fontFamily`, `fontSize` and `theme` (the
-// colors) are set by applyTheme.
+// Terminal settings shared by every tab. `fontFamily`, `fontSize`, `lineHeight` and
+// `theme` (the colors) are set by applyTheme.
 const termOptions = {
-  lineHeight: 1.1,
   cursorBlink: true,
   fontWeightBold: "normal",
   drawBoldTextInBrightColors: false,
@@ -1183,13 +1182,23 @@ projectsEl.addEventListener("mousedown", (e) => {
 // settings. The font size and terminal colors go to xterm.js, the app colors to the
 // CSS variables in styles.css. The Theme panel edits them live.
 
-const FONT_SIZES = { min: 8, max: 40 };
+// The theme's number settings: limits for their fields (xterm.js needs a line
+// height of at least 1).
+const NUMBER_SETTINGS = {
+  fontSize: { label: "Font size", min: 8, max: 40, step: 1, integer: true },
+  lineHeight: { label: "Line height", min: 1, max: 2, step: 0.05 },
+};
+const validNumber = (key, value) => {
+  const { min, max, integer } = NUMBER_SETTINGS[key];
+  return typeof value === "number" && (integer ? Number.isInteger(value) : Number.isFinite(value)) && value >= min && value <= max;
+};
 const savedSettings = (await loadStore("settings")) ?? {};
 // Saved as "colors" before font size was added (and "theme" once held a theme name).
 const savedTheme = (typeof savedSettings.theme === "object" ? savedSettings.theme : savedSettings.colors) ?? {};
 const theme = {
   fontFamily: typeof savedTheme.fontFamily === "string" ? savedTheme.fontFamily : DEFAULT_THEME.fontFamily,
-  fontSize: Number.isInteger(savedTheme.fontSize) ? savedTheme.fontSize : DEFAULT_THEME.fontSize,
+  fontSize: validNumber("fontSize", savedTheme.fontSize) ? savedTheme.fontSize : DEFAULT_THEME.fontSize,
+  lineHeight: validNumber("lineHeight", savedTheme.lineHeight) ? savedTheme.lineHeight : DEFAULT_THEME.lineHeight,
   terminal: { ...DEFAULT_THEME.terminal, ...savedTheme.terminal },
   app: { ...DEFAULT_THEME.app, ...savedTheme.app },
 };
@@ -1201,10 +1210,12 @@ const fontStack = (name) => `${name === "SF Mono" ? "ui-monospace" : `"${name}"`
 function applyTheme() {
   termOptions.fontFamily = fontStack(theme.fontFamily);
   termOptions.fontSize = theme.fontSize;
+  termOptions.lineHeight = theme.lineHeight;
   termOptions.theme = { ...theme.terminal };
   for (const s of sessions.values()) {
     s.term.options.fontFamily = termOptions.fontFamily;
     s.term.options.fontSize = theme.fontSize;
+    s.term.options.lineHeight = theme.lineHeight;
     // A new object each time, so xterm.js sees the change.
     s.term.options.theme = { ...theme.terminal };
   }
@@ -1227,7 +1238,9 @@ function persistTheme() {
   themeTimer = setTimeout(() => {
     const saved = { terminal: changed("terminal"), app: changed("app") };
     if (theme.fontFamily !== DEFAULT_THEME.fontFamily) saved.fontFamily = theme.fontFamily;
-    if (theme.fontSize !== DEFAULT_THEME.fontSize) saved.fontSize = theme.fontSize;
+    for (const key of Object.keys(NUMBER_SETTINGS)) {
+      if (theme[key] !== DEFAULT_THEME[key]) saved[key] = theme[key];
+    }
     invoke("store_save", { key: "settings", data: JSON.stringify({ theme: saved }) });
   }, 300);
 }
@@ -1337,20 +1350,22 @@ function fontFamilyRow() {
   );
 }
 
-// The terminal font size, in pixels: a number field with arrows.
-function fontSizeRow() {
+// A number setting (font size in pixels, line height as a multiple of it): a number
+// field with arrows.
+function numberRow(key) {
+  const { label, min, max, step } = NUMBER_SETTINGS[key];
   const input = el("input", {
     type: "number",
-    className: "font-size",
-    min: FONT_SIZES.min,
-    max: FONT_SIZES.max,
-    step: 1,
+    className: "number",
+    min,
+    max,
+    step,
     oninput: () => {
-      const size = Number(input.value);
-      const ok = Number.isInteger(size) && size >= FONT_SIZES.min && size <= FONT_SIZES.max;
+      const value = Number(input.value);
+      const ok = input.value.trim() !== "" && validNumber(key, value);
       input.classList.toggle("invalid", !ok);
       if (!ok) return;
-      theme.fontSize = size;
+      theme[key] = value;
       applyTheme();
       persistTheme();
     },
@@ -1358,12 +1373,12 @@ function fontSizeRow() {
     onblur: () => update(),
   });
   const update = () => {
-    input.value = theme.fontSize;
+    input.value = theme[key];
     input.classList.remove("invalid");
   };
   themeUpdaters.push(update);
   update();
-  return el("div", { className: "color-row" }, el("span", { className: "label", textContent: "Font size" }), input);
+  return el("div", { className: "color-row" }, el("span", { className: "label", textContent: label }), input);
 }
 
 // A row per color: name, a swatch (opens the macOS color picker) and a hex field.
@@ -1409,7 +1424,8 @@ function renderTheme() {
   themeListEl.replaceChildren(
     el("h3", { textContent: "Font" }),
     fontFamilyRow(),
-    fontSizeRow(),
+    numberRow("fontSize"),
+    numberRow("lineHeight"),
     ...section("Terminal colors", "terminal"),
     ...section("App colors", "app"),
   );
@@ -1430,6 +1446,7 @@ themeResetEl.addEventListener("click", () => {
   themeResetEl.textContent = "Reset to Defaults";
   theme.fontFamily = DEFAULT_THEME.fontFamily;
   theme.fontSize = DEFAULT_THEME.fontSize;
+  theme.lineHeight = DEFAULT_THEME.lineHeight;
   Object.assign(theme.terminal, DEFAULT_THEME.terminal);
   Object.assign(theme.app, DEFAULT_THEME.app);
   applyTheme();
