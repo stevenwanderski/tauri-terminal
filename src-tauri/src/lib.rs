@@ -205,6 +205,35 @@ fn process_cwd(_pid: u32) -> Option<String> {
     None
 }
 
+// Installed font families with a monospaced face, sorted, for the terminal font
+// setting. Async so it runs off the main thread (macOS has hundreds of fonts).
+#[tauri::command]
+async fn mono_fonts() -> Vec<String> {
+    mono_font_families()
+}
+
+#[cfg(target_os = "macos")]
+fn mono_font_families() -> Vec<String> {
+    use core_text::font_descriptor::{SymbolicTraitAccessors, TraitAccessors};
+    let Some(descriptors) = core_text::font_collection::create_for_all_families().get_descriptors()
+    else {
+        return Vec::new();
+    };
+    let families: std::collections::BTreeSet<String> = descriptors
+        .iter()
+        .filter(|d| d.traits().symbolic_traits().is_monospace())
+        .map(|d| d.family_name())
+        // Names starting with "." are system-internal fonts.
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    families.into_iter().collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mono_font_families() -> Vec<String> {
+    Vec::new()
+}
+
 // Frontend data (the open tabs, projects and settings) lives in JSON files in the
 // app's data directory. The frontend owns the formats; Rust just stores them. Keys are
 // limited to a known list so they can't be used as arbitrary paths.
@@ -311,6 +340,7 @@ pub fn run() {
             pty_close,
             pty_close_all,
             pty_cwds,
+            mono_fonts,
             store_save,
             store_load
         ])
