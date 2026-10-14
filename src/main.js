@@ -10,6 +10,9 @@ const termOptions = {
   cursorBlink: true,
   fontWeightBold: "normal",
   drawBoldTextInBrightColors: false,
+  // Effectively unlimited history (xterm.js needs a finite number). Lines only take
+  // memory once they're written, roughly 12 bytes per column each.
+  scrollback: 1_000_000,
 };
 
 // Tabs are either loose or in a project. The top bar holds loose tabs and open
@@ -25,9 +28,9 @@ const terminalsEl = document.getElementById("terminals");
 const menuEl = document.getElementById("menu");
 const projectsEl = document.getElementById("projects");
 
-// Each tab is an xterm.js instance plus a PTY in Rust, matched by id.
+// Each tab is an xterm.js instance plus a PTY in Rust, matched by an id from Rust
+// (pty_new_id), unique for as long as the app runs.
 const sessions = new Map(); // id -> { term, fitAddon, el, tabEl, labelEl, pending, project, ... }
-let nextId = 1;
 let activeId = null;
 
 const openProjects = new Map(); // id -> { name, color, savedId, chipEl, stripEl, lastTabId }
@@ -52,6 +55,10 @@ function leastUsedColor(colors) {
   return PROJECT_SLOTS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
 }
 
+// If this page was reloaded, the previous page's shells are still running in Rust.
+// End them; their exit events name ids no tab here has, so they're ignored.
+await invoke("pty_close_all");
+
 await listen("pty-output", (event) => {
   const { id, data } = event.payload;
   const s = sessions.get(id);
@@ -73,7 +80,7 @@ await listen("pty-exit", (event) => closeTab(event.payload));
 // and opening saved projects. `command` runs once the shell is ready, unless `run` is
 // false (restored tabs keep their command for saving, but don't rerun it).
 async function newTab(projectId = activeProject, { cwd = null, name = null, command = null, run = true } = {}) {
-  const id = nextId++;
+  const id = await invoke("pty_new_id");
 
   const el = document.createElement("div");
   el.className = "terminal";
@@ -522,8 +529,8 @@ function cycle(step) {
 }
 
 // Escape closes an open menu, then the projects panel.
-// Shift+Cmd+P toggles the projects panel; while it's open, Cmd+S saves the project
-// being edited and the tab shortcuts below are off.
+// While the projects panel is open (Shift+Cmd+P, from the menu bar), Cmd+S saves the
+// project being edited and the tab shortcuts below are off.
 // Cmd+T opens a new tab in the current project (or a loose tab if none is selected).
 // Capture phase so this runs before xterm.js handles the key.
 window.addEventListener(
@@ -536,12 +543,6 @@ window.addEventListener(
     if (e.key === "Escape" && !menuEl.hidden) {
       handled();
       hideMenu();
-      return;
-    }
-    if (e.metaKey && e.shiftKey && e.code === "KeyP") {
-      handled();
-      if (projectsEl.hidden) showProjects();
-      else closeProjects();
       return;
     }
     if (!projectsEl.hidden) {
@@ -581,17 +582,18 @@ async function newTabHere(projectId = activeProject) {
 newTabEl.addEventListener("click", () => newTabHere(null));
 newProjectTabEl.addEventListener("click", () => newTabHere(activeProject));
 
+// A new (unsaved) project with one tab, its name ready to edit.
+function startNewProject() {
+  const projectId = createProject();
+  newTab(projectId);
+  renameProject(projectId);
+}
+
 // The ▾ menu: a new (unsaved) project, saved projects to open, and the projects panel.
+// The Projects menu in the macOS menu bar has the same project items.
 projectsMenuEl.addEventListener("click", () => {
   const items = [
-    {
-      label: "New Project",
-      action: () => {
-        const projectId = createProject();
-        newTab(projectId);
-        renameProject(projectId);
-      },
-    },
+    { label: "New Project", action: startNewProject },
     "-",
     ...savedProjects.map((p) => ({ label: `Open ${p.name}`, action: () => openSavedProject(p) })),
     { label: "Manage Projects…  ⇧⌘P", action: () => showProjects() },
@@ -792,6 +794,7 @@ savedProjects = savedProjects.map((p) =>
 );
 
 function persistProjects() {
+  refreshProjectsMenu();
   return invoke("store_save", { key: "projects", data: JSON.stringify(savedProjects) });
 }
 
@@ -886,6 +889,11 @@ function showProjects() {
   if (!draft && savedProjects.length) loadDraft(savedProjects[0]);
   renderProjects();
   projectEditorEl.querySelector(".project-name")?.focus();
+}
+
+function toggleProjects() {
+  if (projectsEl.hidden) showProjects();
+  else closeProjects();
 }
 
 function closeProjects() {
@@ -1236,3 +1244,42 @@ applyTheme(THEMES.find((t) => t.name === settings.theme) ?? THEMES[0]);
 await restore();
 restored = true;
 save();
+
+// ---- macOS menu bar ----
+// Tauri's default menus (app, File, Edit, View, Window, Help) plus a Projects menu
+// before Window. Its items are rebuilt whenever the saved projects change. Its
+// shortcut (Shift+Cmd+P) is handled by the menu, not the keydown handler above.
+
+const { Menu, Submenu, MenuItem, PredefinedMenuItem } = window.__TAURI__.menu;
+let projectsSubmenu = null;
+let menuUpdate = Promise.resolve();
+
+function refreshProjectsMenu() {
+  if (!projectsSubmenu) return;
+  // One rebuild at a time, so quick successive saves can't interleave their items.
+  menuUpdate = menuUpdate.then(async () => {
+    const items = [
+      await MenuItem.new({ text: "New Project", action: startNewProject }),
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      ...(await Promise.all(
+        savedProjects.map((p) => MenuItem.new({ text: `Open ${p.name}`, action: () => openSavedProject(p) })),
+      )),
+      await MenuItem.new({ text: "Manage Projects…", accelerator: "CmdOrCtrl+Shift+P", action: toggleProjects }),
+    ];
+    for (const item of await projectsSubmenu.items()) await projectsSubmenu.remove(item);
+    await projectsSubmenu.append(items);
+  });
+  menuUpdate = menuUpdate.catch((err) => console.error("Projects menu:", err));
+}
+
+try {
+  const menu = await Menu.default();
+  projectsSubmenu = await Submenu.new({ text: "Projects" });
+  const names = await Promise.all((await menu.items()).map((m) => m.text()));
+  const windowIndex = names.indexOf("Window");
+  await menu.insert(projectsSubmenu, windowIndex === -1 ? names.length : windowIndex);
+  await menu.setAsAppMenu();
+  refreshProjectsMenu();
+} catch (err) {
+  console.error("Menu bar setup failed:", err);
+}

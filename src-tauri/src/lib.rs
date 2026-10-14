@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -38,10 +39,18 @@ struct Session {
     child: Box<dyn Child + Send + Sync>,
 }
 
-// Sessions are keyed by a tab id chosen by the frontend.
+// Sessions are keyed by tab id. Ids come from `pty_new_id` and never repeat while the
+// app runs, even across page reloads, so a leftover shell's events can't reach a new
+// tab that happens to share its id.
 #[derive(Default)]
 struct PtyState {
     sessions: Mutex<HashMap<u32, Session>>,
+    last_id: AtomicU32,
+}
+
+#[tauri::command]
+fn pty_new_id(state: State<PtyState>) -> u32 {
+    state.last_id.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 #[derive(Clone, Serialize)]
@@ -148,6 +157,16 @@ fn pty_close(id: u32, state: State<PtyState>) {
     }
 }
 
+// Ends every shell. The page calls this as it loads: after a reload, the previous
+// page's shells are still running but no tab shows them anymore.
+#[tauri::command]
+fn pty_close_all(state: State<PtyState>) {
+    let sessions: Vec<Session> = state.sessions.lock().unwrap().drain().map(|(_, s)| s).collect();
+    for mut session in sessions {
+        let _ = session.child.kill();
+    }
+}
+
 // Each tab's current directory (zsh's own, even while a command runs), keyed by tab id.
 #[tauri::command]
 fn pty_cwds(state: State<PtyState>) -> HashMap<u32, String> {
@@ -224,10 +243,12 @@ pub fn run() {
             greet,
             ping,
             run_once,
+            pty_new_id,
             pty_start,
             pty_write,
             pty_resize,
             pty_close,
+            pty_close_all,
             pty_cwds,
             store_save,
             store_load
