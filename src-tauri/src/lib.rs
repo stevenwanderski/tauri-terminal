@@ -163,6 +163,22 @@ fn pty_close(id: u32, state: State<PtyState>) {
     }
 }
 
+// Whether the tab's shell is waiting at its prompt: zsh's line editor turns off the
+// terminal's line mode (ICANON) while it reads a command line. Input sent before that
+// is echoed by the terminal itself, above where the prompt is then drawn.
+#[tauri::command]
+fn pty_at_prompt(id: u32, state: State<PtyState>) -> bool {
+    let sessions = state.sessions.lock().unwrap();
+    let Some(fd) = sessions.get(&id).and_then(|s| s.master.as_raw_fd()) else {
+        return false;
+    };
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return false;
+    }
+    termios.c_lflag & libc::ICANON == 0
+}
+
 // Ends every shell. The page calls this as it loads: after a reload, the previous
 // page's shells are still running but no tab shows them anymore.
 #[tauri::command]
@@ -344,6 +360,7 @@ pub fn run() {
             pty_resize,
             pty_close,
             pty_close_all,
+            pty_at_prompt,
             pty_cwds,
             mono_fonts,
             store_save,

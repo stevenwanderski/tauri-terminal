@@ -63,14 +63,30 @@ await listen("pty-output", (event) => {
   const s = sessions.get(id);
   if (!s) return;
   s.term.write(new Uint8Array(data));
-
-  // First output means zsh has finished starting, so send anything typed meanwhile.
-  if (s.pending !== null) {
-    const typed = s.pending;
-    s.pending = null;
-    if (typed) invoke("pty_write", { id, data: typed });
-  }
+  if (s.pending !== null) sendPendingWhenReady(id, s);
 });
+
+// A new tab holds typed keys and its project command (`pending`) until zsh's line
+// editor is reading, i.e. its prompt is up. Sent any earlier, they'd be echoed at the
+// top of the screen with the prompt drawn below them. Each burst of output prompts a
+// check (Rust looks at the terminal mode); a fallback sends anyway after a few
+// seconds, for shells that never switch modes.
+function sendPendingWhenReady(id, s) {
+  s.pendingFallback ??= setTimeout(() => sendPending(id, s), 5000);
+  clearTimeout(s.pendingCheck);
+  s.pendingCheck = setTimeout(async () => {
+    if (await invoke("pty_at_prompt", { id })) sendPending(id, s);
+  }, 30);
+}
+
+function sendPending(id, s) {
+  if (s.pending === null) return;
+  const typed = s.pending;
+  s.pending = null;
+  clearTimeout(s.pendingCheck);
+  clearTimeout(s.pendingFallback);
+  if (typed && sessions.has(id)) invoke("pty_write", { id, data: typed }).catch(() => {});
+}
 
 // zsh exited on its own (e.g. `exit`), so close its tab.
 await listen("pty-exit", (event) => closeTab(event.payload));
@@ -99,7 +115,7 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
   } catch (err) {
     console.warn("WebGL renderer unavailable, using DOM renderer", err);
   }
-  // Hold keystrokes until zsh is ready (pending becomes null on its first output).
+  // Hold keystrokes until zsh is at its prompt (pending becomes null then).
   // Sent earlier, the PTY echoes them before the prompt and zsh marks that line with "%".
   term.onData((data) => {
     const s = sessions.get(id);
