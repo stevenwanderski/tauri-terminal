@@ -1197,6 +1197,7 @@ function applyColors() {
   for (const [name, value] of Object.entries(colors.app)) {
     document.documentElement.style.setProperty(`--${name}`, value);
   }
+  document.documentElement.style.setProperty("--terminal-bg", colors.terminal.background);
   // Project colors are palette slots; recolor them from the palette.
   for (const [pid, p] of openProjects) setProjectColor(pid, p.color);
 }

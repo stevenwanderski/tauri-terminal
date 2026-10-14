@@ -242,6 +242,11 @@ body.tab-dragging * {
 #terminals {
   flex: 1;
   min-height: 0;
+  /* A little space between the tabs and the first terminal row, in the terminal's
+     own background color (set from JS). Padding here, not on .terminal: the fit
+     addon sizes the terminal from .terminal's height. */
+  padding-top: 6px;
+  background-color: var(--terminal-bg);
 }
 
 .terminal {
