@@ -13,6 +13,7 @@
         "title": "Funky Term",
         "width": 800,
         "height": 600,
+        "visible": false,
         "theme": "Dark"
       }
     ],

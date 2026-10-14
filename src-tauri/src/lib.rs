@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_window_state::StateFlags;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -232,12 +233,72 @@ fn store_load(app: AppHandle, key: String) -> Option<String> {
     std::fs::read_to_string(store_path(&app, &key).ok()?).ok()
 }
 
+// Sizes the window to its saved size (or its default) and centers it in the screen's
+// usable area, below the menu bar and above the Dock.
+// - The saved size is read from the window-state plugin's file rather than applied
+//   with its restore and measured back: during setup, window changes are only queued
+//   (the event loop isn't running yet), so measuring would still give the old size.
+// - Not `window.center()`: on macOS that's AppKit's `center`, which puts the window
+//   somewhat above center vertically.
+// - In logical points, from the screen's scale factor: a hidden window can report a
+//   different one, which would throw off physical pixels.
+fn place_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.primary_monitor() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let (area_x, area_y) = (area.position.x as f64 / scale, area.position.y as f64 / scale);
+    let (area_w, area_h) = (area.size.width as f64 / scale, area.size.height as f64 / scale);
+
+    let saved = saved_window_size(app).map(|(w, h)| (w as f64 / scale, h as f64 / scale));
+    let Some((w, h)) = saved.or_else(|| {
+        let size = window.inner_size().ok()?.to_logical::<f64>(window.scale_factor().ok()?);
+        Some((size.width, size.height))
+    }) else {
+        return;
+    };
+    let (w, h) = (w.min(area_w), h.min(area_h));
+
+    let _ = window.set_size(tauri::LogicalSize::new(w, h));
+    let _ = window.set_position(tauri::LogicalPosition::new(
+        area_x + (area_w - w) / 2.0,
+        area_y + (area_h - h) / 2.0,
+    ));
+}
+
+// The main window's size (physical pixels) as last saved by the window-state plugin.
+fn saved_window_size(app: &AppHandle) -> Option<(u32, u32)> {
+    let path = app.path().app_config_dir().ok()?.join(tauri_plugin_window_state::DEFAULT_FILENAME);
+    let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let main = state.get("main")?;
+    let size = |key: &str| main.get(key)?.as_u64().filter(|&v| v > 0).map(|v| v as u32);
+    Some((size("width")?, size("height")?))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // Native folder picker for project tab directories.
         .plugin(tauri_plugin_dialog::init())
+        // Saves the window's size when the app quits (applied in setup below).
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::SIZE)
+                .skip_initial_state("main")
+                .build(),
+        )
+        // Reopen at the last size, centered on the screen. The window starts hidden
+        // (tauri.conf.json) and is shown once it's in place.
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                place_window(app.handle(), &window);
+                window.show()?;
+                window.set_focus()?;
+            }
+            Ok(())
+        })
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
