@@ -101,6 +101,12 @@ body {
 .tab .close {
   grid-column: 3;
   justify-self: end;
+  /* Shown on hover only. Hidden rather than removed, so tabs keep their size. */
+  visibility: hidden;
+}
+
+.tab:hover .close {
+  visibility: visible;
 }
 
 /* Projects stand apart from loose tabs: tinted background, semibold name and an
@@ -546,4 +552,75 @@ body.tab-dragging * {
 
 .project-title .dot {
   margin-right: 8px;
+}
+
+/* ---- Colors panel ---- */
+
+/* Docked on the right with no dimming, so the terminal shows the colors live. */
+#colors {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px;
+  font: 13px -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--fg);
+}
+
+.projects-panel.colors-panel {
+  width: 330px;
+  height: auto;
+}
+
+#colors-list {
+  flex: 1;
+  padding: 0 16px 12px;
+  overflow-y: auto;
+}
+
+#colors-list h3 {
+  margin: 16px 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.color-row .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projects-panel input[type="color"] {
+  width: 30px;
+  height: 22px;
+  padding: 2px;
+  cursor: pointer;
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+.projects-panel input.hex {
+  width: 78px;
+  padding: 3px 6px;
+  font: 12px Monaco, monospace;
 }

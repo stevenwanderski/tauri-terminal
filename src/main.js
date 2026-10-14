@@ -1,8 +1,8 @@
-import { THEMES } from "./themes.js";
+import { DEFAULT_COLORS } from "./colors.js";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-// Terminal settings shared by every tab. `theme` (the colors) is set by applyTheme.
+// Terminal settings shared by every tab. `theme` (the colors) is set by applyColors.
 const termOptions = {
   fontFamily: "Monaco, monospace",
   fontSize: 16,
@@ -27,6 +27,7 @@ const newProjectTabEl = document.getElementById("new-project-tab");
 const terminalsEl = document.getElementById("terminals");
 const menuEl = document.getElementById("menu");
 const projectsEl = document.getElementById("projects");
+const colorsEl = document.getElementById("colors");
 
 // Each tab is an xterm.js instance plus a PTY in Rust, matched by an id from Rust
 // (pty_new_id), unique for as long as the app runs.
@@ -37,15 +38,15 @@ const openProjects = new Map(); // id -> { name, color, savedId, chipEl, stripEl
 let nextProjectId = 1;
 let activeProject = null; // the active tab's project, or null when a loose tab is active
 
-// Project colors are slots in the active theme's ANSI palette, so they follow theme
+// Project colors are slots in the ANSI palette, so they follow color
 // changes. (A custom "#rrggbb" also works and stays fixed.)
 const PROJECT_SLOTS = ["magenta", "green", "yellow", "blue", "red", "cyan"];
-const colorOf = (slot) => theme.terminal[slot] ?? slot;
+const colorOf = (slot) => colors.terminal[slot] ?? slot;
 
-// Older saves stored hex colors from the default theme; map those back to their slot.
+// Older saves stored hex colors from the default palette; map those back to their slot.
 function toSlot(color) {
   if (!color || PROJECT_SLOTS.includes(color)) return color;
-  return PROJECT_SLOTS.find((slot) => THEMES[0].terminal[slot] === color.toLowerCase()) ?? color;
+  return PROJECT_SLOTS.find((slot) => DEFAULT_COLORS.terminal[slot] === color.toLowerCase()) ?? color;
 }
 
 // The slot used least among `colors`, first in palette order on ties, so each new
@@ -528,7 +529,7 @@ function cycle(step) {
   }
 }
 
-// Escape closes an open menu, then the projects panel.
+// Escape closes an open menu, then the colors or projects panel.
 // While the projects panel is open (Shift+Cmd+P, from the menu bar), Cmd+S saves the
 // project being edited and the tab shortcuts below are off.
 // Cmd+T opens a new tab in the current project (or a loose tab if none is selected).
@@ -543,6 +544,13 @@ window.addEventListener(
     if (e.key === "Escape" && !menuEl.hidden) {
       handled();
       hideMenu();
+      return;
+    }
+    if (!colorsEl.hidden) {
+      if (e.key === "Escape") {
+        handled();
+        closeColors();
+      }
       return;
     }
     if (!projectsEl.hidden) {
@@ -589,7 +597,8 @@ function startNewProject() {
   renameProject(projectId);
 }
 
-// The ▾ menu: a new (unsaved) project, saved projects to open, and the projects panel.
+// The ▾ menu: a new (unsaved) project, saved projects to open, the projects panel and
+// the colors panel.
 // The Projects menu in the macOS menu bar has the same project items.
 projectsMenuEl.addEventListener("click", () => {
   const items = [
@@ -598,9 +607,7 @@ projectsMenuEl.addEventListener("click", () => {
     ...savedProjects.map((p) => ({ label: `Open ${p.name}`, action: () => openSavedProject(p) })),
     { label: "Manage Projects…  ⇧⌘P", action: () => showProjects() },
     "-",
-    // Until there's a theme picker: the bundled themes, current one checked.
-    { header: "Theme" },
-    ...THEMES.map((t) => ({ label: `${t === theme ? "✓" : "\u2003"} ${t.name}`, action: () => setTheme(t) })),
+    { label: "Edit Colors…", action: () => showColors() },
   ];
   const r = projectsMenuEl.getBoundingClientRect();
   showMenu(r.left, r.bottom, items);
@@ -608,72 +615,6 @@ projectsMenuEl.addEventListener("click", () => {
 
 // Refit whenever the terminal area changes size (window resizes, project bar showing).
 new ResizeObserver(fit).observe(terminalsEl);
-
-// ---- Themes ----
-// A theme (themes.js) colors the terminals directly and the rest of the app through
-// the CSS variables in styles.css, derived here from the terminal colors unless the
-// theme pins them. Switching applies to everything open, live; the choice is saved.
-
-const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-const rgbToHex = (rgb) => `#${rgb.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
-// `t` of the way from color a to color b.
-const mix = (a, b, t) => {
-  const [ra, rb] = [hexToRgb(a), hexToRgb(b)];
-  return rgbToHex(ra.map((v, i) => v + (rb[i] - v) * t));
-};
-const luminance = (hex) => {
-  const [r, g, b] = hexToRgb(hex).map((v) => v / 255);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-};
-
-// App colors from a terminal theme. Bars are the background shaded darker: strongly
-// on dark themes, gently on light ones. Surfaces, lines and muted text step from the
-// background toward the foreground.
-function appColors(terminal, accent = terminal.magenta) {
-  const { background: bg, foreground: fg } = terminal;
-  const light = luminance(bg) > 0.5;
-  const shade = (amount) => mix(bg, "#000000", light ? amount / 4 : amount);
-  return {
-    bg,
-    fg,
-    bar: shade(0.3),
-    sunken: shade(0.37),
-    tint: mix(shade(0.3), fg, 0.05),
-    raised: mix(bg, fg, 0.05),
-    "raised-hover": mix(bg, fg, 0.1),
-    highlight: mix(bg, accent, 0.3),
-    divider: mix(bg, fg, 0.05),
-    border: mix(bg, fg, 0.1),
-    "border-strong": mix(bg, fg, 0.22),
-    muted: mix(fg, bg, 0.4),
-    placeholder: mix(fg, bg, 0.65),
-    accent,
-    "accent-hover": mix(accent, light ? "#000000" : "#ffffff", 0.15),
-    "on-accent": luminance(accent) > 0.5 ? "#111111" : "#ffffff",
-    danger: terminal.red,
-    backdrop: light ? "rgba(0, 0, 0, 0.25)" : "rgba(0, 0, 0, 0.45)",
-  };
-}
-
-let theme = THEMES[0];
-
-function applyTheme(next) {
-  theme = next;
-  termOptions.theme = theme.terminal;
-  for (const s of sessions.values()) s.term.options.theme = theme.terminal;
-  const vars = { ...appColors(theme.terminal, theme.accent), ...theme.app };
-  for (const [name, value] of Object.entries(vars)) {
-    document.documentElement.style.setProperty(`--${name}`, value);
-  }
-  // Project colors are palette slots; recolor them from the new palette.
-  for (const [pid, p] of openProjects) setProjectColor(pid, p.color);
-  if (!projectsEl.hidden) renderProjects();
-}
-
-function setTheme(next) {
-  applyTheme(next);
-  invoke("store_save", { key: "settings", data: JSON.stringify({ theme: next.name }) });
-}
 
 // ---- Session: what's open, restored on the next launch ----
 // The top bar's items in order (loose tabs, and projects with their tabs), each tab's
@@ -1238,8 +1179,178 @@ projectsEl.addEventListener("mousedown", (e) => {
   if (e.target === projectsEl) closeProjects();
 });
 
-const settings = (await loadStore("settings")) ?? {};
-applyTheme(THEMES.find((t) => t.name === settings.theme) ?? THEMES[0]);
+// ---- Colors ----
+// One set of colors: the defaults (colors.js) with the user's changes on top, saved
+// in settings. The terminal colors go to xterm.js, the app colors to the CSS
+// variables in styles.css. The Colors panel edits them live.
+
+const savedColors = (await loadStore("settings"))?.colors ?? {};
+const colors = {
+  terminal: { ...DEFAULT_COLORS.terminal, ...savedColors.terminal },
+  app: { ...DEFAULT_COLORS.app, ...savedColors.app },
+};
+
+function applyColors() {
+  termOptions.theme = { ...colors.terminal };
+  // A new object each time, so xterm.js sees the change.
+  for (const s of sessions.values()) s.term.options.theme = { ...colors.terminal };
+  for (const [name, value] of Object.entries(colors.app)) {
+    document.documentElement.style.setProperty(`--${name}`, value);
+  }
+  // Project colors are palette slots; recolor them from the palette.
+  for (const [pid, p] of openProjects) setProjectColor(pid, p.color);
+}
+
+// Only colors that differ from the defaults are saved.
+let colorsTimer = null;
+function persistColors() {
+  const changed = (group) =>
+    Object.fromEntries(Object.entries(colors[group]).filter(([k, v]) => v !== DEFAULT_COLORS[group][k]));
+  clearTimeout(colorsTimer);
+  colorsTimer = setTimeout(() => {
+    const data = { colors: { terminal: changed("terminal"), app: changed("app") } };
+    invoke("store_save", { key: "settings", data: JSON.stringify(data) });
+  }, 300);
+}
+
+const COLOR_LABELS = {
+  terminal: {
+    background: "Background",
+    foreground: "Text",
+    cursor: "Cursor",
+    cursorAccent: "Text under cursor",
+    selectionBackground: "Selection",
+    selectionForeground: "Selected text",
+    black: "Black",
+    red: "Red",
+    green: "Green",
+    yellow: "Yellow",
+    blue: "Blue",
+    magenta: "Magenta",
+    cyan: "Cyan",
+    white: "White",
+    brightBlack: "Bright black",
+    brightRed: "Bright red",
+    brightGreen: "Bright green",
+    brightYellow: "Bright yellow",
+    brightBlue: "Bright blue",
+    brightMagenta: "Bright magenta",
+    brightCyan: "Bright cyan",
+    brightWhite: "Bright white",
+  },
+  app: {
+    bg: "Active tab, inputs",
+    fg: "Bar and panel text",
+    bar: "Top bar, menus, panels",
+    sunken: "Panel sidebar",
+    tint: "Project chips",
+    raised: "Project bar, buttons",
+    "raised-hover": "Buttons (hover)",
+    highlight: "Project saved flash",
+    divider: "Dividers",
+    border: "Borders",
+    "border-strong": "Menu borders",
+    muted: "Secondary text",
+    placeholder: "Placeholder text",
+    accent: "Accent",
+    "accent-hover": "Accent (hover)",
+    "on-accent": "Text on accent",
+    danger: "Delete buttons",
+  },
+};
+
+const colorsListEl = document.getElementById("colors-list");
+const colorsResetEl = document.getElementById("colors-reset");
+let colorUpdaters = []; // refresh each row's swatch and hex field from `colors`
+let resetArmed = false;
+
+function showColors() {
+  hideMenu();
+  colorsEl.hidden = false;
+  renderColors();
+}
+
+function closeColors() {
+  colorsEl.hidden = true;
+  sessions.get(activeId)?.term.focus();
+}
+
+function setColor(group, key, value) {
+  colors[group][key] = value;
+  applyColors();
+  persistColors();
+}
+
+// A row per color: name, a swatch (opens the macOS color picker) and a hex field.
+function colorRow(group, key) {
+  const swatch = el("input", {
+    type: "color",
+    oninput: () => {
+      setColor(group, key, swatch.value);
+      hex.value = swatch.value;
+    },
+  });
+  const hex = el("input", {
+    className: "hex",
+    spellcheck: false,
+    maxLength: 7,
+    oninput: () => {
+      const value = `#${hex.value.trim().replace(/^#/, "").toLowerCase()}`;
+      const ok = /^#[0-9a-f]{6}$/.test(value);
+      hex.classList.toggle("invalid", !ok);
+      if (!ok) return;
+      setColor(group, key, value);
+      swatch.value = value;
+    },
+    // Leaving the field drops an unfinished value.
+    onblur: () => update(),
+  });
+  const update = () => {
+    swatch.value = colors[group][key];
+    hex.value = colors[group][key];
+    hex.classList.remove("invalid");
+  };
+  colorUpdaters.push(update);
+  update();
+  return el("div", { className: "color-row" }, el("span", { className: "label", textContent: COLOR_LABELS[group][key] }), swatch, hex);
+}
+
+function renderColors() {
+  colorUpdaters = [];
+  const section = (title, group) => [
+    el("h3", { textContent: title }),
+    ...Object.keys(DEFAULT_COLORS[group]).map((key) => colorRow(group, key)),
+  ];
+  colorsListEl.replaceChildren(...section("Terminal", "terminal"), ...section("App", "app"));
+}
+
+// Two clicks, like deleting a project.
+colorsResetEl.addEventListener("click", () => {
+  if (!resetArmed) {
+    resetArmed = true;
+    colorsResetEl.textContent = "Click again to reset";
+    setTimeout(() => {
+      resetArmed = false;
+      colorsResetEl.textContent = "Reset to Defaults";
+    }, 3000);
+    return;
+  }
+  resetArmed = false;
+  colorsResetEl.textContent = "Reset to Defaults";
+  Object.assign(colors.terminal, DEFAULT_COLORS.terminal);
+  Object.assign(colors.app, DEFAULT_COLORS.app);
+  applyColors();
+  persistColors();
+  for (const update of colorUpdaters) update();
+});
+document.getElementById("colors-close").addEventListener("click", () => closeColors());
+document.getElementById("colors-done").addEventListener("click", () => closeColors());
+// The panel leaves the terminal visible; clicking it closes the panel.
+colorsEl.addEventListener("mousedown", (e) => {
+  if (e.target === colorsEl) closeColors();
+});
+
+applyColors();
 
 await restore();
 restored = true;
