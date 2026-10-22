@@ -122,6 +122,13 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
     if (s.pending === null) invoke("pty_write", { id, data });
     else s.pending += data;
   });
+  // xterm.js sends a plain Enter for Shift+Enter. Send ESC + Enter instead, which
+  // Claude Code (and other line editors) take as a line break rather than submit.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.key !== "Enter" || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return true;
+    if (e.type === "keydown") term.input("\x1b\r");
+    return false;
+  });
 
   const tabEl = document.createElement("div");
   tabEl.className = "bar-item tab";
