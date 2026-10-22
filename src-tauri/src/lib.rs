@@ -83,6 +83,9 @@ fn pty_start(
     let mut cmd = CommandBuilder::new("/bin/zsh");
     cmd.arg("-l");
     cmd.env("TERM", "xterm-256color");
+    // xterm.js draws 24-bit color. Programs only send it when COLORTERM says so, and
+    // otherwise round their colors to the 256-color palette.
+    cmd.env("COLORTERM", "truecolor");
     // Apps opened from Finder or the Dock don't get a terminal's LANG, and without it
     // zsh and other programs fall back to ASCII (non-ASCII text shows as codes).
     if std::env::var_os("LANG").is_none() {
