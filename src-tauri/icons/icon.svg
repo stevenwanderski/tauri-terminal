@@ -8,7 +8,9 @@
     <rect x="100" y="100" width="824" height="824" rx="185" fill="#28252b"/>
   </g>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
-  <!-- Prompt: caret and underscore cursor, set low-left like the start of a line -->
-  <path d="M 260 420 L 440 560 L 260 700" fill="none" stroke="#fff8ec" stroke-width="90" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="500" y="660" width="190" height="80" rx="14" fill="#ffc739"/>
+  <!-- Prompt: caret and underscore cursor, centred and scaled up 15% -->
+  <g transform="translate(512 512) scale(1.15) translate(-452 -560)">
+    <path d="M 260 420 L 440 560 L 260 700" fill="none" stroke="#fff8ec" stroke-width="90" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="500" y="660" width="190" height="80" rx="14" fill="#ffc739"/>
+  </g>
 </svg>
