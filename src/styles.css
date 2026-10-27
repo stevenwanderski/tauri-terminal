@@ -762,10 +762,120 @@ input[type="color"]::-webkit-color-swatch {
   margin-bottom: 8px;
 }
 
-.projects-panel input[type="checkbox"] {
+.projects-panel input[type="checkbox"],
+.projects-panel input[type="radio"] {
   margin: 0;
   padding: 0;
   accent-color: var(--accent);
+}
+
+/* ---- Left sidebar (Preferences) ----
+   The top bar becomes a column beside the project bar and terminal. Its width
+   (--sidebar-width, set from JS) is dragged at its right edge. */
+
+#sidebar-resizer {
+  display: none;
+}
+
+body.tabs-left {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+body.tabs-left #bar {
+  grid-row: 1 / 3;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 6px;
+  overflow-y: auto;
+  border-right: 1px solid var(--divider);
+}
+
+body.tabs-left #project-bar {
+  grid-column: 2;
+}
+
+body.tabs-left #terminals {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+/* Dot, label and close button left to right, the label taking the room left over. */
+body.tabs-left #bar > .tab {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 5px 6px 5px 8px;
+  border-radius: 6px;
+  box-shadow: inset 2px 0 0 var(--tab-color, transparent);
+}
+
+body.tabs-left #bar > .tab .label {
+  max-width: none;
+}
+
+body.tabs-left #bar > .tab + .tab {
+  border-left: none;
+}
+
+body.tabs-left #bar > .tab:hover:not(.active),
+body.tabs-left .project-chip:hover:not(.active) {
+  background-color: var(--tint);
+}
+
+body.tabs-left .project-chip {
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background-color: transparent;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+body.tabs-left .project-chip.active {
+  background-color: var(--raised);
+}
+
+body.tabs-left #bar button {
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-align: left;
+}
+
+body.tabs-left #bar button:hover {
+  background-color: var(--tint);
+  color: var(--fg);
+}
+
+/* The ▾ menu sits at the bottom of the sidebar. */
+body.tabs-left #projects-menu {
+  margin-top: auto;
+  margin-left: 0;
+}
+
+body.tabs-left #sidebar-resizer {
+  /* Fixed rather than inside #bar, so it spans the window even when the bar scrolls. */
+  display: block;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 5px);
+  width: 5px;
+  cursor: col-resize;
+}
+
+body.tabs-left #sidebar-resizer:hover,
+body.sidebar-resizing #sidebar-resizer {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+body.sidebar-resizing,
+body.sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Links get the pointer cursor only while Cmd is held (see "cmd-held" in main.js). */

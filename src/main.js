@@ -627,34 +627,37 @@ window.addEventListener(
 );
 window.addEventListener("blur", hideMenu);
 
-// Drag a tab or project sideways to reorder it within its bar. Uses pointer events
+// Drag a tab or project to reorder it within its bar (up and down in the sidebar).
+// Uses pointer events
 // rather than HTML5 drag-and-drop, which Tauri's file-drop handling can intercept.
 function makeDraggable(itemEl) {
   itemEl.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || e.target.closest(".close")) return;
-    const startX = e.clientX;
+    const vertical = getComputedStyle(itemEl.parentElement).flexDirection === "column";
+    const [pos, start, end] = vertical ? ["clientY", "top", "bottom"] : ["clientX", "left", "right"];
+    const startX = e[pos];
     let lastX = startX;
     let dragging = false;
 
     const onMove = (e) => {
       // A few pixels of slack so a plain click doesn't count as a drag.
-      if (!dragging && Math.abs(e.clientX - startX) < 5) return;
+      if (!dragging && Math.abs(e[pos] - startX) < 5) return;
       dragging = true;
       document.body.classList.add("tab-dragging");
 
       // Swap as soon as the pointer enters a neighbor, but only the neighbor in the
       // direction of travel; otherwise a wider neighbor would swap straight back.
       const container = itemEl.parentElement;
-      const x = e.clientX;
+      const x = e[pos];
       if (x > lastX) {
         let next = itemEl.nextElementSibling;
-        while (next?.classList.contains("bar-item") && x > next.getBoundingClientRect().left) {
+        while (next?.classList.contains("bar-item") && x > next.getBoundingClientRect()[start]) {
           container.insertBefore(next, itemEl);
           next = itemEl.nextElementSibling;
         }
       } else if (x < lastX) {
         let prev = itemEl.previousElementSibling;
-        while (prev && x < prev.getBoundingClientRect().right) {
+        while (prev && x < prev.getBoundingClientRect()[end]) {
           container.insertBefore(itemEl, prev);
           prev = itemEl.previousElementSibling;
         }
@@ -799,7 +802,9 @@ projectsMenuEl.addEventListener("click", () => {
     { label: "Preferences…  ⌘,", action: () => showPreferences() },
   ];
   const r = projectsMenuEl.getBoundingClientRect();
-  showMenu(r.left, r.bottom, items);
+  // In the sidebar the button is at the bottom, so open beside it rather than over it.
+  if (document.body.classList.contains("tabs-left")) showMenu(r.right + 4, r.top, items);
+  else showMenu(r.left, r.bottom, items);
 });
 
 // Refit whenever the terminal area changes size (window resizes, project bar showing).
@@ -1668,16 +1673,55 @@ const PREFERENCES = {
 const preferences = Object.fromEntries(
   Object.keys(PREFERENCES).map((key) => [key, savedSettings.preferences?.[key] !== false]),
 );
+// Where the top bar's items (loose tabs and projects) go: "top" or a "left" sidebar.
+preferences.tabsPosition = savedSettings.preferences?.tabsPosition === "left" ? "left" : "top";
+preferences.sidebarWidth = Number(savedSettings.preferences?.sidebarWidth) || 200;
 
 function applyPreferences() {
   for (const [key, { offClass }] of Object.entries(PREFERENCES)) {
     document.body.classList.toggle(offClass, !preferences[key]);
   }
+  document.body.classList.toggle("tabs-left", preferences.tabsPosition === "left");
+  document.body.style.setProperty("--sidebar-width", `${preferences.sidebarWidth}px`);
 }
 
-// A checkbox per preference, under its section's heading.
+// Dragging the sidebar's right edge sets its width.
+document.getElementById("sidebar-resizer").addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  document.body.classList.add("sidebar-resizing");
+  const onMove = (e) => {
+    preferences.sidebarWidth = Math.round(Math.min(Math.max(e.clientX, 120), innerWidth / 2));
+    applyPreferences();
+  };
+  const onUp = () => {
+    document.body.classList.remove("sidebar-resizing");
+    persistSettings();
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+});
+
+// A choice of tab position, then a checkbox per preference under its section's heading.
 function renderPreferences() {
-  const rows = [];
+  const rows = [el("h3", { textContent: "Tabs and projects" })];
+  for (const [value, label] of [["top", "Top bar"], ["left", "Left sidebar"]]) {
+    const radio = el("input", {
+      type: "radio",
+      name: "tabs-position",
+      checked: preferences.tabsPosition === value,
+      onchange: () => {
+        preferences.tabsPosition = value;
+        applyPreferences();
+        persistSettings();
+      },
+    });
+    rows.push(el("label", { className: "check-row" }, radio, label));
+  }
   let section = null;
   for (const [key, p] of Object.entries(PREFERENCES)) {
     if (p.section !== section) rows.push(el("h3", { textContent: (section = p.section) }));
