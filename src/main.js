@@ -803,8 +803,11 @@ projectsMenuEl.addEventListener("click", () => {
   ];
   const r = projectsMenuEl.getBoundingClientRect();
   // In the sidebar the button is at the bottom, so open beside it rather than over it.
-  if (document.body.classList.contains("tabs-left")) showMenu(r.right + 4, r.top, items);
-  else showMenu(r.left, r.bottom, items);
+  if (preferences.tabsPosition === "left") showMenu(r.right + 4, r.top, items);
+  else if (preferences.tabsPosition === "right") {
+    showMenu(r.left, r.top, items);
+    menuEl.style.left = `${r.left - 4 - menuEl.offsetWidth}px`;
+  } else showMenu(r.left, r.bottom, items);
 });
 
 // Refit whenever the terminal area changes size (window resizes, project bar showing).
@@ -1673,25 +1676,28 @@ const PREFERENCES = {
 const preferences = Object.fromEntries(
   Object.keys(PREFERENCES).map((key) => [key, savedSettings.preferences?.[key] !== false]),
 );
-// Where the top bar's items (loose tabs and projects) go: "top" or a "left" sidebar.
-preferences.tabsPosition = savedSettings.preferences?.tabsPosition === "left" ? "left" : "top";
+// Where the top bar's items (loose tabs and projects) go: "top", or a "left" or "right" sidebar.
+preferences.tabsPosition = ["left", "right"].includes(savedSettings.preferences?.tabsPosition)
+  ? savedSettings.preferences.tabsPosition
+  : "top";
 preferences.sidebarWidth = Number(savedSettings.preferences?.sidebarWidth) || 200;
 
 function applyPreferences() {
   for (const [key, { offClass }] of Object.entries(PREFERENCES)) {
     document.body.classList.toggle(offClass, !preferences[key]);
   }
-  document.body.classList.toggle("tabs-left", preferences.tabsPosition === "left");
+  document.body.classList.toggle("tabs-sidebar", preferences.tabsPosition !== "top");
+  document.body.classList.toggle("tabs-right", preferences.tabsPosition === "right");
   document.body.style.setProperty("--sidebar-width", `${preferences.sidebarWidth}px`);
 }
 
-// Dragging the sidebar's right edge sets its width.
+// Dragging the sidebar's inner edge sets its width.
 document.getElementById("sidebar-resizer").addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
   e.preventDefault();
   document.body.classList.add("sidebar-resizing");
   const onMove = (e) => {
-    preferences.sidebarWidth = Math.round(Math.min(Math.max(e.clientX, 120), innerWidth / 2));
+    preferences.sidebarWidth = Math.round(Math.min(Math.max(preferences.tabsPosition === "right" ? innerWidth - e.clientX : e.clientX, 120), innerWidth / 2));
     applyPreferences();
   };
   const onUp = () => {
@@ -1709,7 +1715,7 @@ document.getElementById("sidebar-resizer").addEventListener("pointerdown", (e) =
 // A choice of tab position, then a checkbox per preference under its section's heading.
 function renderPreferences() {
   const rows = [el("h3", { textContent: "Tabs and projects" })];
-  for (const [value, label] of [["top", "Top bar"], ["left", "Left sidebar"]]) {
+  for (const [value, label] of [["top", "Top bar"], ["left", "Left sidebar"], ["right", "Right sidebar"]]) {
     const radio = el("input", {
       type: "radio",
       name: "tabs-position",
