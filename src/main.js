@@ -1687,16 +1687,41 @@ preferences.tabsPosition = ["left", "right"].includes(savedSettings.preferences?
   ? savedSettings.preferences.tabsPosition
   : "top";
 preferences.sidebarWidth = Number(savedSettings.preferences?.sidebarWidth) || 200;
+preferences.sidebarCollapsed = savedSettings.preferences?.sidebarCollapsed === true;
 
 function applyPreferences() {
   for (const [key, { offClass, onClass }] of Object.entries(PREFERENCES)) {
     if (onClass) document.body.classList.toggle(onClass, preferences[key]);
     else document.body.classList.toggle(offClass, !preferences[key]);
   }
-  document.body.classList.toggle("tabs-sidebar", preferences.tabsPosition !== "top");
+  const sidebar = preferences.tabsPosition !== "top";
+  const collapsed = sidebar && preferences.sidebarCollapsed;
+  document.body.classList.toggle("tabs-sidebar", sidebar);
   document.body.classList.toggle("tabs-right", preferences.tabsPosition === "right");
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
   document.body.style.setProperty("--sidebar-width", `${preferences.sidebarWidth}px`);
 }
+
+// The sidebar's hide button collapses it and the floating button brings it back.
+// While collapsed, hovering the window's edge on the sidebar's side shows it over the
+// terminal ("peek") until the pointer leaves it; its hide button then pins it open.
+function setSidebarCollapsed(collapsed) {
+  preferences.sidebarCollapsed = collapsed;
+  document.body.classList.remove("sidebar-peek");
+  applyPreferences();
+  persistSettings();
+}
+document.getElementById("sidebar-collapse").addEventListener("click", () => {
+  setSidebarCollapsed(!preferences.sidebarCollapsed);
+});
+document.getElementById("sidebar-show").addEventListener("click", () => setSidebarCollapsed(false));
+document.getElementById("sidebar-edge").addEventListener("mouseenter", () => {
+  document.body.classList.add("sidebar-peek");
+});
+// Kept open while its ▾ menu is up, since the menu lies outside the sidebar.
+barEl.addEventListener("mouseleave", () => {
+  if (menuEl.hidden) document.body.classList.remove("sidebar-peek");
+});
 
 // Dragging the sidebar's inner edge sets its width.
 document.getElementById("sidebar-resizer").addEventListener("pointerdown", (e) => {

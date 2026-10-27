@@ -856,10 +856,112 @@ body.tabs-sidebar #bar button:hover {
   color: var(--fg);
 }
 
-/* The ▾ menu sits at the bottom of the sidebar. */
-body.tabs-sidebar #projects-menu {
+/* The ▾ menu and the hide button sit at the bottom of the sidebar. In the top bar
+   their wrapper drops out of the layout, leaving ▾ at the far right. */
+#bar-end {
+  display: contents;
+}
+
+body.tabs-sidebar #bar-end {
+  display: flex;
+  justify-content: space-between;
   margin-top: auto;
+}
+
+body.tabs-sidebar #projects-menu {
   margin-left: 0;
+}
+
+#sidebar-collapse,
+#sidebar-show,
+#sidebar-edge {
+  display: none;
+}
+
+body.tabs-sidebar #sidebar-collapse {
+  display: block;
+}
+
+#bar-end svg,
+#sidebar-show svg {
+  display: block;
+}
+
+/* The panel icon's divider is on the sidebar's side. */
+body.tabs-right #bar-end svg,
+body.tabs-right #sidebar-show svg {
+  transform: scaleX(-1);
+}
+
+body.sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+body.sidebar-collapsed.tabs-right {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+body.sidebar-collapsed:not(.sidebar-peek) #bar,
+body.sidebar-collapsed #sidebar-resizer {
+  display: none;
+}
+
+/* Peeking: the sidebar floats over the terminal at its usual width. */
+body.sidebar-peek #bar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 15;
+  box-sizing: border-box;
+  width: var(--sidebar-width);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+}
+
+body.sidebar-peek.tabs-right #bar {
+  left: auto;
+  right: 0;
+}
+
+body.sidebar-collapsed #sidebar-show {
+  display: block;
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  z-index: 10;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: var(--bar);
+  color: var(--muted);
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+body.sidebar-collapsed #sidebar-show:hover {
+  color: var(--fg);
+  opacity: 1;
+}
+
+/* A thin strip along the window's edge that shows the sidebar when hovered. */
+body.sidebar-collapsed #sidebar-edge {
+  display: block;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 5;
+  width: 4px;
+}
+
+body.sidebar-collapsed.tabs-right #sidebar-show {
+  left: auto;
+  right: 10px;
+}
+
+body.sidebar-collapsed.tabs-right #sidebar-edge {
+  left: auto;
+  right: 0;
 }
 
 body.tabs-sidebar #sidebar-resizer {
