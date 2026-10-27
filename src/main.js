@@ -447,6 +447,7 @@ function setProjectColor(projectId, color) {
   const p = openProjects.get(projectId);
   p.color = toSlot(color);
   p.chipEl.style.setProperty("--project-color", colorOf(p.color));
+  p.stripEl.style.setProperty("--project-color", colorOf(p.color));
   scheduleSave();
 }
 
@@ -1667,14 +1668,19 @@ themeEl.addEventListener("mousedown", (e) => {
 applyTheme();
 
 // ---- Preferences ----
-// On/off settings, saved in settings next to the theme (all on by default). Each one
-// that's off adds its class to body, which the CSS reads.
+// On/off settings, saved in settings next to the theme. Each one with an offClass is
+// on by default and adds that class to body when off; one with an onClass is off by
+// default and adds its class when on. The CSS reads the classes.
 const PREFERENCES = {
   projectDots: { section: "Claude status dots", label: "On projects", offClass: "hide-project-dots" },
   subTabDots: { section: "Claude status dots", label: "On tabs in projects", offClass: "hide-sub-tab-dots" },
+  projectTabColors: { section: "Projects", label: "Color tabs with their project's color", onClass: "project-tab-colors" },
 };
 const preferences = Object.fromEntries(
-  Object.keys(PREFERENCES).map((key) => [key, savedSettings.preferences?.[key] !== false]),
+  Object.entries(PREFERENCES).map(([key, p]) => [
+    key,
+    p.onClass ? savedSettings.preferences?.[key] === true : savedSettings.preferences?.[key] !== false,
+  ]),
 );
 // Where the top bar's items (loose tabs and projects) go: "top", or a "left" or "right" sidebar.
 preferences.tabsPosition = ["left", "right"].includes(savedSettings.preferences?.tabsPosition)
@@ -1683,8 +1689,9 @@ preferences.tabsPosition = ["left", "right"].includes(savedSettings.preferences?
 preferences.sidebarWidth = Number(savedSettings.preferences?.sidebarWidth) || 200;
 
 function applyPreferences() {
-  for (const [key, { offClass }] of Object.entries(PREFERENCES)) {
-    document.body.classList.toggle(offClass, !preferences[key]);
+  for (const [key, { offClass, onClass }] of Object.entries(PREFERENCES)) {
+    if (onClass) document.body.classList.toggle(onClass, preferences[key]);
+    else document.body.classList.toggle(offClass, !preferences[key]);
   }
   document.body.classList.toggle("tabs-sidebar", preferences.tabsPosition !== "top");
   document.body.classList.toggle("tabs-right", preferences.tabsPosition === "right");

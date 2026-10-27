@@ -196,6 +196,12 @@ body.hide-sub-tab-dots .tab-strip .claude-dot {
   visibility: hidden;
 }
 
+/* Tabs in a project take its color (--project-color, set on the strip from JS) in
+   place of their own, which is kept for when this is turned off. */
+body.project-tab-colors .tab-strip .tab {
+  box-shadow: inset 0 -2px 0 var(--project-color);
+}
+
 /* Brief highlight confirming "Save Project". */
 .project-chip.flash {
   animation: project-saved 0.9s ease-out;
