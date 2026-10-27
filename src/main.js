@@ -11,7 +11,22 @@ const termOptions = {
   // Effectively unlimited history (xterm.js needs a finite number). Lines only take
   // memory once they're written, roughly 12 bytes per column each.
   scrollback: 1_000_000,
+  // Hyperlinks programs mark with OSC 8 (Vite, Claude Code). Plain-text URLs go
+  // through WebLinksAddon in newTab. xterm.js's default here uses confirm(), which
+  // Tauri's webview ignores.
+  linkHandler: { activate: (e, url) => openLink(e, url) },
 };
+
+// Cmd+click opens a URL in the default browser (the pointer only shows with Cmd held; see styles.css).
+function openLink(e, url) {
+  if (e.metaKey) window.__TAURI__.opener.openUrl(url).catch((err) => console.error("openUrl failed", url, err));
+}
+
+// Tracks whether Cmd is held, so links show the pointer cursor only then.
+for (const type of ["keydown", "keyup", "mousemove"]) {
+  window.addEventListener(type, (e) => document.body.classList.toggle("cmd-held", e.metaKey), true);
+}
+window.addEventListener("blur", () => document.body.classList.remove("cmd-held"));
 
 // Tabs are either loose or in a project. The top bar holds loose tabs and open
 // projects (▣) side by side; selecting a project shows its tabs in a second bar
@@ -26,6 +41,7 @@ const terminalsEl = document.getElementById("terminals");
 const menuEl = document.getElementById("menu");
 const projectsEl = document.getElementById("projects");
 const themeEl = document.getElementById("theme");
+const preferencesEl = document.getElementById("preferences");
 
 // Each tab is an xterm.js instance plus a PTY in Rust, matched by an id from Rust
 // (pty_new_id), unique for as long as the app runs.
@@ -91,10 +107,109 @@ function sendPending(id, s) {
 // zsh exited on its own (e.g. `exit`), so close its tab.
 await listen("pty-exit", (event) => closeTab(event.payload));
 
+// Files dropped on the window are pasted into the active tab as backslash-escaped
+// paths, like Terminal.app does, so Claude Code (and the shell) pick them up.
+await listen("tauri://drag-drop", (event) => {
+  const s = sessions.get(activeId);
+  if (!s) return;
+  const paths = event.payload.paths.map((p) => p.replace(/[^\w\-.,:/@+=%]/g, "\\$&"));
+  s.term.paste(paths.join(" ") + " ");
+  s.term.focus();
+});
+
+// ---- Claude Code status ----
+// Claude Code reports what it's doing with OSC 7501 ("program status") once the
+// terminal answers its probe. Each report is colon-separated fields: `state=` (working,
+// blocked, done, idle, error, or clear as it exits), `kind=` for what a blocked
+// session waits on (permission, question, auth), and others unused here. Reports with
+// an `id=` are about its background tasks and are ignored. A tab shows the state as a
+// colored dot, a project chip shows its most urgent tab's, and a chime plays when
+// Claude finishes or needs an answer.
+const PROGRAM_STATUS = 7501;
+// Most urgent first.
+const CLAUDE_STATES = ["blocked", "done", "working", "error", "idle"];
+const CLAUDE_LABELS = {
+  blocked: "Claude needs your input",
+  done: "Claude finished",
+  working: "Claude is working",
+  error: "Claude hit an error",
+  idle: "Claude is ready",
+};
+const BLOCKED_LABELS = { permission: "Claude is asking for permission", question: "Claude has a question" };
+
+function programStatus(id, data) {
+  const fields = Object.fromEntries(
+    data.split(":").map((field) => {
+      const i = field.indexOf("=");
+      return i === -1 ? [field, ""] : [field.slice(0, i), field.slice(i + 1)];
+    }),
+  );
+  if (fields.id !== undefined) return;
+  if (fields.state === "clear") setClaudeStatus(id, null);
+  else if (CLAUDE_STATES.includes(fields.state)) setClaudeStatus(id, { state: fields.state, kind: fields.kind });
+}
+
+function setClaudeStatus(id, status) {
+  const s = sessions.get(id);
+  if (!s) return;
+  const before = s.claude;
+  s.claude = status;
+  // Claude resends its status whenever its message or progress changes.
+  if (before?.state === status?.state && before?.kind === status?.kind) return;
+  if (status) {
+    s.tabEl.dataset.claude = status.state;
+    s.dotEl.title = (status.state === "blocked" && BLOCKED_LABELS[status.kind]) || CLAUDE_LABELS[status.state];
+  } else {
+    delete s.tabEl.dataset.claude;
+  }
+  if (status?.state === "done" || status?.state === "blocked") chime(status.state);
+  showProjectStatus(s.project);
+}
+
+// The project chip's dot: the most urgent status among its tabs.
+function showProjectStatus(projectId) {
+  const p = openProjects.get(projectId);
+  if (!p) return;
+  const states = tabIds(projectId).map((id) => sessions.get(id)?.claude?.state);
+  const state = CLAUDE_STATES.find((st) => states.includes(st));
+  if (state) p.chipEl.dataset.claude = state;
+  else delete p.chipEl.dataset.claude;
+}
+
+// If Claude Code ends without clearing its status (it crashed or was killed), its
+// shell is back in the foreground; clear the dot then.
+setInterval(async () => {
+  for (const [id, s] of sessions) {
+    if (s.claude && (await invoke("pty_shell_foreground", { id }))) setClaudeStatus(id, null);
+  }
+}, 2000);
+
+// Two soft notes: falling when Claude finishes, rising when it needs an answer. Audio
+// can only start after a user gesture, so the first key or click resumes it.
+const audio = new AudioContext();
+for (const type of ["keydown", "pointerdown"]) {
+  window.addEventListener(type, () => audio.state === "suspended" && audio.resume(), true);
+}
+
+function chime(state) {
+  const notes = state === "done" ? [1046.5, 784] : [784, 1046.5]; // C6 and G5
+  notes.forEach((frequency, i) => {
+    const t = audio.currentTime + i * 0.12;
+    const osc = new OscillatorNode(audio, { frequency });
+    const gain = new GainNode(audio, { gain: 0 });
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.12, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(t);
+    osc.stop(t + 0.45);
+  });
+}
+
 // `projectId` null makes a loose tab. `cwd` and `name` are used when restoring tabs
 // and opening saved projects. `command` runs once the shell is ready, unless `run` is
 // false (restored tabs keep their command for saving, but don't rerun it).
-async function newTab(projectId = activeProject, { cwd = null, name = null, command = null, run = true } = {}) {
+async function newTab(projectId = activeProject, { cwd = null, name = null, command = null, color = null, run = true } = {}) {
   const id = await invoke("pty_new_id");
 
   const el = document.createElement("div");
@@ -104,6 +219,7 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
   const term = new Terminal(termOptions);
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon(openLink));
   term.open(el);
   // The WebGL renderer draws block and box-drawing characters itself instead of using
   // the font. Monaco lacks most of them (e.g. ▐ ▛ ▜ ▌), and fallback fonts don't line
@@ -143,10 +259,23 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
   });
   makeDraggable(tabEl);
 
+  // Claude Code's status (see "Claude Code status" below), left of the label.
+  const dotEl = document.createElement("span");
+  dotEl.className = "claude-dot";
+  tabEl.appendChild(dotEl);
+
   const labelEl = document.createElement("span");
   labelEl.className = "label";
   labelEl.textContent = name ?? "zsh";
   tabEl.appendChild(labelEl);
+
+  // Claude Code asks whether the terminal takes status reports ("?"), then sends them.
+  // The reply goes out like xterm.js's own replies, so it stays in order with them.
+  term.parser.registerOscHandler(PROGRAM_STATUS, (data) => {
+    if (data.startsWith("?")) term.input(`\x1b]${PROGRAM_STATUS};?\x1b\\`, false);
+    else programStatus(id, data);
+    return true;
+  });
 
   // The shell names the tab with OSC 1 (oh-my-zsh sends the current directory at
   // the prompt and the command name while one runs) or OSC 0 (title + tab name).
@@ -178,6 +307,7 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
     el,
     tabEl,
     labelEl,
+    dotEl,
     // A project's command goes first in the queue, as if typed and Enter pressed.
     pending: command && run ? `${command}\r` : "",
     project: projectId,
@@ -185,10 +315,15 @@ async function newTab(projectId = activeProject, { cwd = null, name = null, comm
     command,
     autoTitle: "zsh",
     customName: name,
+    // A palette slot (like project colors), shown as the tab's bottom border, or null.
+    color: null,
     // Saved until zsh reports its own directory, so an early save doesn't lose it.
     startCwd: cwd,
     renaming: false,
+    // Claude Code's last reported status, or null when it isn't running.
+    claude: null,
   });
+  setTabColor(id, color);
   // Show and fit the tab first so the PTY starts at the right size.
   activate(id);
   await invoke("pty_start", { id, cols: term.cols, rows: term.rows, cwd });
@@ -223,6 +358,7 @@ function closeTab(id) {
   s.el.remove();
   s.tabEl.remove();
   const projectGone = s.project !== null && removeProjectIfEmpty(s.project);
+  if (!projectGone) showProjectStatus(s.project);
 
   if (sessions.size === 0) {
     newTab(null);
@@ -314,6 +450,14 @@ function setProjectColor(projectId, color) {
   scheduleSave();
 }
 
+function setTabColor(id, color) {
+  const s = sessions.get(id);
+  s.color = toSlot(color);
+  if (s.color) s.tabEl.style.setProperty("--tab-color", colorOf(s.color));
+  else s.tabEl.style.removeProperty("--tab-color");
+  scheduleSave();
+}
+
 function switchProject(projectId) {
   const ids = tabIds(projectId);
   const last = openProjects.get(projectId).lastTabId;
@@ -335,6 +479,8 @@ function moveTab(id, target) {
     openProjects.get(target).stripEl.appendChild(s.tabEl);
   }
   const fromGone = from !== null && removeProjectIfEmpty(from);
+  if (!fromGone) showProjectStatus(from);
+  showProjectStatus(target);
 
   if (id === activeId) {
     if (from !== null && !fromGone) switchProject(from);
@@ -361,6 +507,8 @@ function tabMenuItems(id) {
     if (pid !== s.project) items.push({ label: `Move to ${p.name}`, action: () => moveTab(id, pid) });
   }
   if (s.project !== null) items.push({ label: "Remove from Project", action: () => moveTab(id, null) });
+  items.push("-", { swatches: PROJECT_SLOTS, selected: s.color, pick: (c) => setTabColor(id, c) });
+  if (s.color) items.push({ label: "Remove Color", action: () => setTabColor(id, null) });
   items.push("-", { label: "Close Tab", action: () => closeTab(id) });
   return items;
 }
@@ -550,10 +698,12 @@ function cycle(step) {
   }
 }
 
-// Escape closes an open menu, then the theme or projects panel.
+// Escape closes an open menu, then the preferences, theme or projects panel.
+// Cmd+, opens Preferences.
 // While the projects panel is open (Shift+Cmd+P, from the menu bar), Cmd+S saves the
 // project being edited and the tab shortcuts below are off.
 // Cmd+T opens a new tab in the current project (or a loose tab if none is selected).
+// Cmd+K clears the active tab's screen and scrollback, keeping the prompt line.
 // Capture phase so this runs before xterm.js handles the key.
 window.addEventListener(
   "keydown",
@@ -565,6 +715,13 @@ window.addEventListener(
     if (e.key === "Escape" && !menuEl.hidden) {
       handled();
       hideMenu();
+      return;
+    }
+    if (!preferencesEl.hidden) {
+      if (e.key === "Escape") {
+        handled();
+        closePreferences();
+      }
       return;
     }
     if (!themeEl.hidden) {
@@ -585,9 +742,19 @@ window.addEventListener(
       return;
     }
     if (!e.metaKey) return;
+    if (!e.shiftKey && e.code === "Comma") {
+      handled();
+      showPreferences();
+      return;
+    }
     if (!e.shiftKey && e.code === "KeyT") {
       handled();
       newTabHere();
+      return;
+    }
+    if (!e.shiftKey && e.code === "KeyK") {
+      handled();
+      sessions.get(activeId)?.term.clear();
       return;
     }
     if (!e.shiftKey) return;
@@ -618,8 +785,8 @@ function startNewProject() {
   renameProject(projectId);
 }
 
-// The ▾ menu: a new (unsaved) project, saved projects to open, the projects panel and
-// the theme panel.
+// The ▾ menu: a new (unsaved) project, saved projects to open, the projects panel, the
+// theme panel and preferences.
 // The Projects menu in the macOS menu bar has the same project items.
 projectsMenuEl.addEventListener("click", () => {
   const items = [
@@ -629,6 +796,7 @@ projectsMenuEl.addEventListener("click", () => {
     { label: "Manage Projects…  ⇧⌘P", action: () => showProjects() },
     "-",
     { label: "Edit Theme…", action: () => showTheme() },
+    { label: "Preferences…  ⌘,", action: () => showPreferences() },
   ];
   const r = projectsMenuEl.getBoundingClientRect();
   showMenu(r.left, r.bottom, items);
@@ -655,7 +823,7 @@ function scheduleSave() {
 // yet use their start directory.
 function snapshotTab(id, cwds) {
   const s = sessions.get(id);
-  return { cwd: cwds[id] ?? s.startCwd, name: s.customName, command: s.command };
+  return { cwd: cwds[id] ?? s.startCwd, name: s.customName, command: s.command, color: s.color };
 }
 
 async function save() {
@@ -710,7 +878,7 @@ async function restore() {
       const ids = tabIds(projectId);
       shows.push(() => activate(ids[Math.min(item.activeTab ?? 0, ids.length - 1)]));
     } else {
-      const id = await newTab(null, { cwd: item.cwd, name: item.name, command: item.command, run: false });
+      const id = await newTab(null, { cwd: item.cwd, name: item.name, command: item.command, color: item.color, run: false });
       shows.push(() => activate(id));
     }
   }
@@ -1248,23 +1416,28 @@ function applyTheme() {
     document.documentElement.style.setProperty(`--${name}`, value);
   }
   document.documentElement.style.setProperty("--terminal-bg", theme.terminal.background);
+  // Claude status dots use these palette colors.
+  for (const slot of ["red", "green", "yellow", "blue"]) {
+    document.documentElement.style.setProperty(`--ansi-${slot}`, theme.terminal[slot]);
+  }
   // Project colors are palette slots; recolor them from the palette.
   for (const [pid, p] of openProjects) setProjectColor(pid, p.color);
+  for (const [id, s] of sessions) setTabColor(id, s.color);
 }
 
-// Only what differs from the defaults is saved.
-let themeTimer = null;
-function persistTheme() {
+// Saves the theme and preferences. Only what differs from the default theme is saved.
+let settingsTimer = null;
+function persistSettings() {
   const changed = (group) =>
     Object.fromEntries(Object.entries(theme[group]).filter(([k, v]) => v !== DEFAULT_THEME[group][k]));
-  clearTimeout(themeTimer);
-  themeTimer = setTimeout(() => {
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(() => {
     const saved = { terminal: changed("terminal"), app: changed("app") };
     if (theme.fontFamily !== DEFAULT_THEME.fontFamily) saved.fontFamily = theme.fontFamily;
     for (const key of Object.keys(NUMBER_SETTINGS)) {
       if (theme[key] !== DEFAULT_THEME[key]) saved[key] = theme[key];
     }
-    invoke("store_save", { key: "settings", data: JSON.stringify({ theme: saved }) });
+    invoke("store_save", { key: "settings", data: JSON.stringify({ theme: saved, preferences }) });
   }, 300);
 }
 
@@ -1333,7 +1506,7 @@ function closeTheme() {
 function setColor(group, key, value) {
   theme[group][key] = value;
   applyTheme();
-  persistTheme();
+  persistSettings();
 }
 
 // Installed monospaced fonts (from Rust) plus SF Mono, fetched once.
@@ -1351,7 +1524,7 @@ function fontFamilyRow() {
     onchange: () => {
       theme.fontFamily = select.value;
       applyTheme();
-      persistTheme();
+      persistSettings();
     },
   });
   const update = async () => {
@@ -1390,7 +1563,7 @@ function numberRow(key) {
       if (!ok) return;
       theme[key] = value;
       applyTheme();
-      persistTheme();
+      persistSettings();
     },
     // Leaving the field drops an unfinished value.
     onblur: () => update(),
@@ -1473,7 +1646,7 @@ themeResetEl.addEventListener("click", () => {
   Object.assign(theme.terminal, DEFAULT_THEME.terminal);
   Object.assign(theme.app, DEFAULT_THEME.app);
   applyTheme();
-  persistTheme();
+  persistSettings();
   for (const update of themeUpdaters) update();
 });
 document.getElementById("theme-close").addEventListener("click", () => closeTheme());
@@ -1484,6 +1657,63 @@ themeEl.addEventListener("mousedown", (e) => {
 });
 
 applyTheme();
+
+// ---- Preferences ----
+// On/off settings, saved in settings next to the theme (all on by default). Each one
+// that's off adds its class to body, which the CSS reads.
+const PREFERENCES = {
+  projectDots: { section: "Claude status dots", label: "On projects", offClass: "hide-project-dots" },
+  subTabDots: { section: "Claude status dots", label: "On tabs in projects", offClass: "hide-sub-tab-dots" },
+};
+const preferences = Object.fromEntries(
+  Object.keys(PREFERENCES).map((key) => [key, savedSettings.preferences?.[key] !== false]),
+);
+
+function applyPreferences() {
+  for (const [key, { offClass }] of Object.entries(PREFERENCES)) {
+    document.body.classList.toggle(offClass, !preferences[key]);
+  }
+}
+
+// A checkbox per preference, under its section's heading.
+function renderPreferences() {
+  const rows = [];
+  let section = null;
+  for (const [key, p] of Object.entries(PREFERENCES)) {
+    if (p.section !== section) rows.push(el("h3", { textContent: (section = p.section) }));
+    const box = el("input", {
+      type: "checkbox",
+      checked: preferences[key],
+      onchange: () => {
+        preferences[key] = box.checked;
+        applyPreferences();
+        persistSettings();
+      },
+    });
+    rows.push(el("label", { className: "check-row" }, box, p.label));
+  }
+  document.getElementById("preferences-list").replaceChildren(...rows);
+}
+
+function showPreferences() {
+  hideMenu();
+  renderPreferences();
+  preferencesEl.hidden = false;
+}
+
+function closePreferences() {
+  preferencesEl.hidden = true;
+  sessions.get(activeId)?.term.focus();
+}
+
+document.getElementById("preferences-close").addEventListener("click", () => closePreferences());
+document.getElementById("preferences-done").addEventListener("click", () => closePreferences());
+// Clicking the dimmed backdrop (outside the panel) also closes it.
+preferencesEl.addEventListener("mousedown", (e) => {
+  if (e.target === preferencesEl) closePreferences();
+});
+
+applyPreferences();
 
 await restore();
 restored = true;

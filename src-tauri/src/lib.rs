@@ -182,6 +182,20 @@ fn pty_at_prompt(id: u32, state: State<PtyState>) -> bool {
     termios.c_lflag & libc::ICANON == 0
 }
 
+// Whether the tab's shell is the terminal's foreground process, i.e. no program it
+// started (like Claude Code) is still running. False if that can't be told.
+#[tauri::command]
+fn pty_shell_foreground(id: u32, state: State<PtyState>) -> bool {
+    let sessions = state.sessions.lock().unwrap();
+    let Some(session) = sessions.get(&id) else {
+        return false;
+    };
+    match (session.master.process_group_leader(), session.child.process_id()) {
+        (Some(group), Some(pid)) => group == pid as libc::pid_t,
+        _ => false,
+    }
+}
+
 // Ends every shell. The page calls this as it loads: after a reload, the previous
 // page's shells are still running but no tab shows them anymore.
 #[tauri::command]
@@ -364,6 +378,7 @@ pub fn run() {
             pty_close,
             pty_close_all,
             pty_at_prompt,
+            pty_shell_foreground,
             pty_cwds,
             mono_fonts,
             store_save,
