@@ -717,6 +717,7 @@ function cycle(step) {
 // project being edited and the tab shortcuts below are off.
 // Cmd+T opens a new tab in the current project (or a loose tab if none is selected).
 // Cmd+K clears the active tab's screen and scrollback, keeping the prompt line.
+// Cmd+1-9 shows the nth open project.
 // Capture phase so this runs before xterm.js handles the key.
 window.addEventListener(
   "keydown",
@@ -768,6 +769,14 @@ window.addEventListener(
     if (!e.shiftKey && e.code === "KeyK") {
       handled();
       sessions.get(activeId)?.term.clear();
+      return;
+    }
+    // Cmd+1-9: the nth open project, in top-bar order.
+    const n = !e.shiftKey && /^Digit[1-9]$/.test(e.code) ? Number(e.code.slice(5)) : 0;
+    if (n) {
+      handled();
+      const chip = barItems().filter((el) => el.classList.contains("project-chip"))[n - 1];
+      if (chip) openItem(chip);
       return;
     }
     if (!e.shiftKey) return;
