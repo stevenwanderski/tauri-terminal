@@ -423,6 +423,15 @@ function createProject(name = null, color = null, savedId = null) {
       { label: "Rename Project", action: () => renameProject(id) },
       { label: "Save Project", action: () => saveOpenProject(id) },
       { label: "Edit Project…", action: () => editOpenProject(id) },
+      // Runs each tab's command again, as if typed at its prompt.
+      {
+        label: "Start Project",
+        action: () =>
+          tabIds(id).forEach((t) => {
+            const { command } = sessions.get(t);
+            if (command) invoke("pty_write", { id: t, data: `${command}\r` }).catch(() => {});
+          }),
+      },
       // Reversed because each tab is placed right after the project.
       {
         label: "Move Tabs Out of Project",
