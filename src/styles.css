@@ -950,7 +950,8 @@ body.sidebar-collapsed #sidebar-edge {
   top: 0;
   bottom: 0;
   left: 0;
-  z-index: 5;
+  /* Above xterm's visible scrollbar (11), below the peeking sidebar (15). */
+  z-index: 12;
   width: 4px;
 }
 
